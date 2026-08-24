@@ -1,0 +1,4 @@
+# dsh-adaptive-context bundle patch: mount the ACP control-plane plugin.
+- insert:
+    - id: adaptive-context
+      name: dsh-adaptive-context
