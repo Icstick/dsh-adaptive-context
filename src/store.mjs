@@ -195,6 +195,22 @@ export function openEvidenceLedger(opts = {}) {
   }
 
   /**
+   * 局部更新 metadata（固定键集校验后合并，2026-08-25 决策）。
+   * @param {string} id
+   * @param {object} patch - metadata 增量（只允许 METADATA_ALLOWED_KEYS 内键）
+   * @returns {object} 更新后的证据行
+   */
+  function updateMetadata(id, patch) {
+    assertMetadataKeys(patch)
+    const row = db.prepare('SELECT * FROM evidence WHERE id = ?').get(id)
+    if (!row) throw new Error(`evidence '${id}' not found`)
+    const merged = { ...JSON.parse(row.metadata), ...patch }
+    db.prepare('UPDATE evidence SET metadata = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(merged), Date.now(), id)
+    return getById(id)
+  }
+
+  /**
    * 查询（read-only）。支持 scope/state/claimDomain/authority/sourceClass 过滤 + 子串。
    * @param {object} q
    * @returns {{items: object[], total: number}}
@@ -248,7 +264,7 @@ export function openEvidenceLedger(opts = {}) {
     db.close()
   }
 
-  return { db, dbPath, append, getById, setState, query, byContentHash, listActive, stats, close }
+  return { db, dbPath, append, getById, setState, updateMetadata, query, byContentHash, listActive, stats, close }
 }
 
 function toEvidence(r) {
