@@ -12,7 +12,7 @@
 
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
-import { hashHex } from './constants.mjs'
+import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 
 export const name = 'adaptive-context'
 export const inject = []
@@ -33,7 +33,11 @@ export function apply(ctx, config = {}) {
   // 只消费 durable session events（user/assistant/tool/turn），幂等 append。
   ctx.on('session/event', (event) => {
     if (!isEvidenceWorthy(event)) return
-    const ev = toEvidenceCandidate(event)
+    const ev = toEvidenceCandidate(event, {
+      scopeId: scopeOf(ctx),
+      agentKey: event.agentKey ?? '',
+      sessionType: event.sessionType ?? 'root',
+    })
     if (!ev) return
     const res = acp.append(ev)
     // MVP：审计落 acp audit 表（TODO v0.1: 若 harness 收录 acp/* 词汇再 append session event）
@@ -88,64 +92,4 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => () => {
     ledger.close()
   })
-}
-
-// --- 内部工具 ---
-
-function isEvidenceWorthy(event) {
-  const type = event?.type ?? ''
-  return [
-    'user/message',
-    'assistant/message',
-    'tool/result',
-    'user/correction',
-  ].includes(type) || /^(user|assistant|tool|turn)\//.test(type)
-}
-
-function toEvidenceCandidate(event) {
-  const type = event?.type ?? ''
-  const text = extractText(event)
-  if (!text) return null
-
-  let sourceClass = 'agent_authored'
-  let claimDomain = 'experience'
-  let authority = 'single_observation'
-  if (type.startsWith('user/')) {
-    sourceClass = 'user_input'
-    claimDomain = 'user_fact'
-    authority = 'user_explicit'
-  }
-  if (type.startsWith('tool/')) {
-    sourceClass = 'external_tool'
-    claimDomain = 'external_fact'
-    authority = 'external_information'
-  }
-  if (type === 'user/correction') {
-    sourceClass = 'user_correction'
-    claimDomain = 'user_preference'
-    authority = 'user_correction'
-  }
-  return {
-    sourceClass,
-    claimDomain,
-    authority,
-    confidence: sourceClass === 'user_input' || sourceClass === 'user_correction' ? 1 : 0.5,
-    durability: 0.5,
-    sensitivity: 'private',
-    content: text,
-    contentHash: hashHex(text),
-    sourceRef: { sessionEventId: event.id ?? event.sessionEventId },
-    sessionType: event.sessionType ?? 'root',
-    agentKey: event.agentKey ?? '',
-    observedAt: new Date().toISOString(),
-  }
-}
-
-function extractText(event) {
-  return event?.content ?? event?.text ?? event?.message?.content ?? ''
-}
-
-function scopeOf(ctx) {
-  // MVP：workspace 作用域按 cwd（对齐 memento workspaceKey 语义）
-  return ctx?.session?.cwd ?? ctx?.cwd ?? 'user-global'
 }

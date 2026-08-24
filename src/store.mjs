@@ -13,8 +13,31 @@ import {
   CLAIM_DOMAINS, SENSITIVITIES, SCOPES, SESSION_TYPES,
   evidenceIdOf, hashHex,
 } from './constants.mjs'
+import { assertAuthorityConsistent } from './governance.mjs'
 
 const PRAGMAS = 'PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;'
+
+/** metadata 固定键集（2026-08-25 决策）：写路径只接受这些键 */
+const METADATA_ALLOWED_KEYS = new Set([
+  'ttlDays',
+  'reviewStatus',
+  'scenarioTags',
+  'sourceVersion',
+])
+
+function assertMetadataKeys(metadata) {
+  if (!metadata) return {}
+  if (typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new TypeError('metadata must be an object')
+  }
+  for (const key of Object.keys(metadata)) {
+    if (!METADATA_ALLOWED_KEYS.has(key)) {
+      throw new TypeError(`metadata key '${key}' not allowed (allowed: ${[...METADATA_ALLOWED_KEYS].join(', ')})`)
+    }
+  }
+  return metadata
+}
+
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS acp_meta (
@@ -115,6 +138,10 @@ export function openEvidenceLedger(opts = {}) {
     if (typeof input.durability !== 'number' || input.durability < 0 || input.durability > 1) {
       throw new TypeError('durability must be in [0, 1]')
     }
+    // authority 与 sourceClass 一致性校验（2026-08-25 决策）
+    assertAuthorityConsistent(input.sourceClass, input.authority)
+    // metadata 固定键集校验
+    assertMetadataKeys(input.metadata)
 
     const contentHash = input.contentHash ?? hashHex(input.content)
     const sourceRef = input.sourceRef ?? {}
