@@ -30,9 +30,34 @@ const SOURCE_DOMAIN_ALLOW = {
   system:           new Set(['user_fact', 'user_preference', 'work', 'experience', 'style', 'external_fact']),
   user_input:       new Set(['user_fact', 'user_preference', 'work', 'experience', 'style', 'external_fact']),
   user_correction:  new Set(['user_fact', 'user_preference', 'work', 'experience', 'style', 'external_fact']),
-  // external_tool 默认不能产生 personal-preference / style / behavior authority
-  external_tool:    new Set(['user_fact', 'work', 'external_fact']),
+  // external_tool 默认不能产生 personal-preference / style / behavior authority；
+  // 可进 experience（外部文档/工具输出补充工作经验，2026-08-25 决策）
+  external_tool:    new Set(['user_fact', 'work', 'experience', 'external_fact']),
   agent_authored:   new Set(['user_fact', 'work', 'experience', 'external_fact']), // 不能直接 claim preference/style
+}
+
+/** sourceClass → authority 确定性映射（2026-08-25 决策，写入校验用） */
+const SOURCE_AUTHORITY_MAP = {
+  system: 'system_policy',
+  user_input: 'user_explicit',
+  user_correction: 'user_correction',
+  external_tool: 'external_information',
+  // agent_authored 走子规则（调用方在 append 前由 authority 归一化层决定）
+  agent_authored: null,
+}
+/** agent_authored 的子规则：按证据性质选 authority */
+export function agentAuthoredAuthority(kind) {
+  if (kind === 'self_eval') return 'agent_self_evaluation'
+  if (kind === 'inference') return 'agent_inference'
+  return 'single_observation'
+}
+/** 校验：authority 与 sourceClass 是否矛盾（外部显式声明的 authority 必须匹配） */
+export function assertAuthorityConsistent(sourceClass, authority) {
+  const expected = SOURCE_AUTHORITY_MAP[sourceClass]
+  if (expected && expected !== authority) {
+    throw new TypeError(`authority '${authority}' inconsistent with sourceClass '${sourceClass}' (expected '${expected}')`)
+  }
+  return true
 }
 
 /**
