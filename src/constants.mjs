@@ -23,12 +23,12 @@ export const SOURCE_CLASSES = Object.freeze([
   'agent_authored',
 ])
 
-/** 权威层级：从高到低。决定"能否改变行为/Profile/Work"，≠ confidence */
+/** 权威层级：从高到低（写入时确定性声明 7 值，2026-08-25 决策）。
+ *  user_repeated_behavior 已移除——"多次观察累积"由 Observation 层表达。 */
 export const AUTHORITY_ORDER = Object.freeze([
   'system_policy',
   'user_explicit',
   'user_correction',
-  'user_repeated_behavior',
   'single_observation',
   'agent_inference',
   'agent_self_evaluation',
