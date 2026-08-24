@@ -3,6 +3,7 @@
 // 写路径经 governance.writeGuard 判定后再落 Ledger（先 validate 后 write）。
 
 import { writeGuard, readGuard } from './governance.mjs'
+import { supersede, quarantine, redact, rollback } from './lifecycle.mjs'
 
 /**
  * 构造 ctx.acp 服务。
@@ -75,9 +76,110 @@ export function createAcpService({ ledger }) {
       return ledger.stats()
     },
 
-    /** 用户可审计导出（不含 secret——secret 本就不入库） */
+    // ===================== 用户权利（GOVERNANCE.md §6） =====================
+
+    /** inspect：读取单条证据详情（含状态/来源/元数据） */
+    inspect(id) {
+      return ledger.getById(id)
+    },
+
+    /** export：用户可审计导出（全部状态，含标注；secret 本就不入库） */
+    export(scopeId, opts = {}) {
+      const rows = opts.includeNonActive
+        ? ledger.query({ scopeId }).items
+        : ledger.listActive(scopeId)
+      return rows.map((ev) => ({
+        id: ev.id,
+        state: ev.state,
+        sourceClass: ev.sourceClass,
+        authority: ev.authority,
+        claimDomain: ev.claimDomain,
+        confidence: ev.confidence,
+        sensitivity: ev.sensitivity,
+        content: ev.content,
+        observedAt: ev.observedAt,
+        supersedes: ev.supersedes,
+        metadata: ev.metadata,
+      }))
+    },
+
+    /**
+     * correct：用户纠正入口。
+     * 写入 user_correction 证据 + supersede 目标旧证据（Level 1 fast-path）。
+     * @param {object} input - { targetId?, correction, sourceRef?, scopeId?, agentKey?, sessionType? }
+     * @returns {{inserted: boolean, newId: string, superseded: boolean, reasons: string[]}}
+     */
+    correct(input = {}) {
+      if (typeof input.correction !== 'string' || input.correction.length === 0) {
+        return { inserted: false, newId: null, superseded: false, reasons: ['correction must be non-empty'] }
+      }
+      const candidate = {
+        sourceClass: 'user_correction',
+        authority: 'user_correction',
+        claimDomain: 'user_preference',
+        confidence: 1,
+        durability: 0.9,
+        sensitivity: 'private',
+        content: input.correction,
+        sourceRef: input.sourceRef ?? {},
+        scopeId: input.scopeId ?? 'user-global',
+        agentKey: input.agentKey ?? '',
+        sessionType: input.sessionType ?? 'root',
+      }
+      const res = this.append(candidate)
+      if (!res.inserted) return { inserted: false, newId: res.id, superseded: false, reasons: res.reasons ?? [] }
+
+      let superseded = false
+      if (input.targetId) {
+        try {
+          supersede(input.targetId, res.id, { ledger })
+          superseded = true
+        } catch (err) {
+          // targetId 无效或无权 supersede——纠正本身已记录，supersede 失败不致命
+          return { inserted: true, newId: res.id, superseded: false, reasons: [err.message] }
+        }
+      }
+      return { inserted: true, newId: res.id, superseded, reasons: [] }
+    },
+
+    /** release：从 quarantine 释放为 active（人工判定安全） */
+    release(id) {
+      const row = ledger.getById(id)
+      if (!row) return { ok: false, reason: 'not found' }
+      if (row.state !== 'quarantined') return { ok: false, reason: `state is ${row.state}, not quarantined` }
+      rollback(id, { ledger })
+      return { ok: true, row: ledger.getById(id) }
+    },
+
+    /** redact：脱敏（内容保留，永不注入） */
+    redact(id) {
+      try {
+        const row = redact(id, { ledger })
+        return { ok: true, row }
+      } catch (err) {
+        return { ok: false, reason: err.message }
+      }
+    },
+
+    /**
+     * delete：用户删除——append-only 语义下不物理删，标记 redacted + reviewStatus=deleted_by_user
+     * （内容保留可审计，但永不注入/recall）。
+     */
+    delete(id) {
+      try {
+        const row = redact(id, { ledger })
+        if (typeof ledger.updateMetadata === 'function') {
+          ledger.updateMetadata(id, { reviewStatus: 'deleted_by_user' })
+        }
+        return { ok: true, row: ledger.getById(id) }
+      } catch (err) {
+        return { ok: false, reason: err.message }
+      }
+    },
+
+    /** 用户可审计导出（不含 secret——secret 本就不入库）——保留旧名兼容 */
     exportActive(scopeId) {
-      return ledger.listActive(scopeId)
+      return this.export(scopeId, { includeNonActive: false })
     },
   }
 }
