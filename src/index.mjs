@@ -13,10 +13,17 @@
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { compose, renderSourceLabelled } from './composer.mjs'
 
 export const name = 'adaptive-context'
 export const inject = []
-export const Config = {}
+export const Config = {
+  ledgerDir: undefined,     // 自定义 Ledger 目录（默认 $DSH_HOME/acp）
+  hotTokens: 300,           // 每次注入 token 上限（MVP 保守值）
+  recallLimit: 20,          // 候选拉取上限
+  targetDomain: 'work',     // 目标域（readGuard 矩阵查表）
+  debug: false,
+}
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -51,28 +58,36 @@ export function apply(ctx, config = {}) {
   ctx.on('agent/pre-step', (meta, next) => {
     try {
       const scopeId = scopeOf(ctx)
-      const budget = config.hotTokens ?? 300
-      const result = acp.recall({
+      // 候选来源：Ledger active 证据（MVP 无 Provider 时语义并入 lexical）
+      const candidates = ledger.query({
         scopeId,
-        targetDomain: 'work',
-        maxTokens: budget,
-        limit: config.recallLimit ?? 10,
+        state: 'active',
+        limit: config.recallLimit ?? 20,
+      }).items
+      const result = compose(candidates, {
+        query: meta?.message ?? '',
+        scopeId,
+        targetDomain: config.targetDomain ?? 'work',
+        hasProvider: false, // MVP：无外部语义 Provider
+        maxTokens: config.hotTokens ?? 300,
       })
       if (result.items.length > 0) {
-        // source-labelled plugin message：作为 untrusted historical context 注入
-        // （MemOS DSH adapter 验证过的范式），不伪装成 System Instruction。
-        const body = result.items
-          .map((ev) => `[acp:evidence ${ev.id} | src=${ev.sourceClass} | domain=${ev.claimDomain}] ${ev.content}`)
-          .join('\n')
-        if (typeof ctx.send === 'function') {
-          ctx.send({
-            role: 'user',
-            content: body,
-            meta: { acp: { source: 'adaptive-context', tokens: result.tokens, dropped: result.dropped.length } },
-          })
-        } else if (typeof ctx.app === 'function' && ctx.app.session?.send) {
-          ctx.app.session.send({ role: 'user', content: body })
+        // source-labelled plugin message：untrusted historical context，
+        // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
+        const body = renderSourceLabelled(result.items)
+        const payload = {
+          role: 'user',
+          content: body,
+          meta: { acp: { source: 'adaptive-context', telemetry: result.telemetry } },
         }
+        if (typeof ctx.send === 'function') {
+          ctx.send(payload)
+        } else if (typeof ctx.app === 'function' && ctx.app.session?.send) {
+          ctx.app.session.send(payload)
+        }
+      }
+      if (config.debug) {
+        ctx.logger?.debug?.(`[acp] compose: ${JSON.stringify(result.telemetry)}`)
       }
     } catch (err) {
       // fail-open：ACP 故障不得阻断 turn
