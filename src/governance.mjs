@@ -3,7 +3,7 @@
 // Read Guard：scope/state/sensitivity/authority-domain 过滤。
 // 全部确定性实现，不调用 LLM（OWASP AMG 参考：基础治理不需要为每次 read 再调模型）。
 
-import { MAX_EVIDENCE_CONTENT_CHARS } from './constants.mjs'
+import { MAX_EVIDENCE_CONTENT_CHARS, CLAIM_DOMAINS } from './constants.mjs'
 
 // --- 确定性 secret/PII 模式（保守，宁可 quarantine 也不放行） ---
 const SECRET_PATTERNS = [
@@ -58,6 +58,60 @@ export function assertAuthorityConsistent(sourceClass, authority) {
     throw new TypeError(`authority '${authority}' inconsistent with sourceClass '${sourceClass}' (expected '${expected}')`)
   }
   return true
+}
+
+/**
+ * authority → claimDomain 资格矩阵（读边界，GOVERNANCE.md §2.5，决策日期 2026-08-25）。
+ *
+ * 行 = 7 个 authority；列 = 6 个 claimDomain。✓ = 该 authority 的证据可注入目标域；
+ * ✗ = 拒绝（不进 active view）。
+ *
+ *   authority              user_fact user_preference work experience style external_fact
+ *   system_policy             ✓         ✓           ✓      ✓        ✓        ✓
+ *   user_explicit             ✓         ✓           ✓      ✓        ✓        ✓
+ *   user_correction           ✓         ✓           ✓      ✓        ✓        ✓
+ *   single_observation        ✓         ✗           ✓      ✓        ✗        ✓
+ *   agent_inference           ✗         ✗           ✗      ✗        ✗        ✗   （不进 active view，MVP quarantine）
+ *   agent_self_evaluation     ✗         ✗           ✗      ✗        ✗        ✗   （永不 promotion）
+ *   external_information      ✓         ✗           ✓      ✓        ✗        ✓
+ *
+ * 语义要点：single_observation 可进 user_fact 但不能影响 preference/style
+ * （"观察到用 TS"≠"用户喜欢 TS"）；external_information 可进 experience
+ * （外部文档/工具输出补充工作经验知识，2026-08-25 调整）。
+ */
+/** 由允许域列表构建矩阵行：列表内 ✓，其余 ✗（全部列显式填充，保证 6 域全覆盖） */
+function makeMatrixRow(allowedDomains) {
+  const allowed = new Set(allowedDomains)
+  return Object.freeze(
+    Object.fromEntries(CLAIM_DOMAINS.map((domain) => [domain, allowed.has(domain)])),
+  )
+}
+
+/** 事实型/经验型域：single_observation 与 external_information 可注入的范围 */
+const FACTUAL_DOMAINS = ['user_fact', 'work', 'experience', 'external_fact']
+
+/** 资格矩阵（只读，行/列均冻结）。 */
+export const AUTHORITY_DOMAIN_MATRIX = Object.freeze({
+  system_policy:         makeMatrixRow([...CLAIM_DOMAINS]),
+  user_explicit:         makeMatrixRow([...CLAIM_DOMAINS]),
+  user_correction:       makeMatrixRow([...CLAIM_DOMAINS]),
+  single_observation:    makeMatrixRow(FACTUAL_DOMAINS),
+  agent_inference:       makeMatrixRow([]),
+  agent_self_evaluation: makeMatrixRow([]),
+  external_information:  makeMatrixRow(FACTUAL_DOMAINS),
+})
+
+/**
+ * 查表：authority 是否允许注入 targetDomain（读边界资格）。
+ * 未知 authority → 返回 true（矩阵不适用，不拒绝；避免新增 authority 时误伤存量调用）。
+ * @param {string} authority
+ * @param {string} targetDomain
+ * @returns {boolean}
+ */
+export function authorityMayClaimDomain(authority, targetDomain) {
+  const row = AUTHORITY_DOMAIN_MATRIX[authority]
+  if (!row) return true
+  return row[targetDomain] === true
 }
 
 /**
@@ -136,11 +190,11 @@ export function readGuard(ev, ctx = {}) {
     if (ev.validUntil && ev.validUntil < t) return { allowed: false, reasons: ['expired'] }
   }
 
-  // authority-domain 兼容：external_information 不能注入到需要 user_preference 权威的域
-  if (ctx.targetDomain === 'user_preference' || ctx.targetDomain === 'style') {
-    if (ev.authority === 'external_information') {
-      return { allowed: false, reasons: ['external information lacks authority for personal preference domain'] }
-    }
+  // authority → claimDomain 资格矩阵：ctx.targetDomain 指定时查表，✗ 拒绝
+  // （GOVERNANCE.md §2.5，2026-08-25：single_observation 不影响 preference/style；
+  //   agent_inference / agent_self_evaluation 不进 active view；external_information 可进 experience）
+  if (ctx.targetDomain && !authorityMayClaimDomain(ev.authority, ctx.targetDomain)) {
+    return { allowed: false, reasons: ['authority not permitted for target domain: ' + ctx.targetDomain] }
   }
 
   return { allowed: true, reasons }

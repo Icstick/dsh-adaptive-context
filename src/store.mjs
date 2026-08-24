@@ -241,7 +241,12 @@ export function openEvidenceLedger(opts = {}) {
     return { total: r.total ?? 0, active: r.active ?? 0, quarantined: r.quarantined ?? 0, superseded: r.superseded ?? 0 }
   }
 
-  function close() { db.close() }
+  let closed = false
+  function close() {
+    if (closed) return // 幂等：重复 close 是 no-op
+    closed = true
+    db.close()
+  }
 
   return { db, dbPath, append, getById, setState, query, byContentHash, listActive, stats, close }
 }
