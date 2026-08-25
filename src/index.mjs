@@ -31,6 +31,16 @@ export const Config = z.object({
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {object} config
  */
+/**
+ * 作用域解析（对齐 dsh-memento 语义：user-global / workspace）。
+ * MVP：单 workspace 简化，固定 user-global；v0.1 按 ctx session cwd 派生 workspace scope。
+ * @param {object} ctx
+ * @returns {string} scopeId（SCOPES 之一）
+ */
+function scopeOf(ctx) {
+  return 'user-global'
+}
+
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
   const acp = createAcpService({ ledger })
@@ -41,17 +51,21 @@ export function apply(ctx, config = {}) {
   // --- Consumer 1：session/event → Evidence ingestion ---
   // 只消费 durable session events（user/assistant/tool/turn），幂等 append。
   ctx.on('session/event', (event) => {
-    if (!isEvidenceWorthy(event)) return
-    const ev = toEvidenceCandidate(event, {
-      scopeId: scopeOf(ctx),
-      agentKey: event.agentKey ?? '',
-      sessionType: event.sessionType ?? 'root',
-    })
-    if (!ev) return
-    const res = acp.append(ev)
-    // MVP：审计落 acp audit 表（TODO v0.1: 若 harness 收录 acp/* 词汇再 append session event）
-    if (config.debug) {
-      ctx.logger?.debug?.(`[acp] ingest ${res.decision} id=${res.id}`)
+    try {
+      if (!isEvidenceWorthy(event)) return
+      const ev = toEvidenceCandidate(event, {
+        scopeId: scopeOf(ctx),
+        agentKey: event.agentKey ?? '',
+        sessionType: event.sessionType ?? 'root',
+      })
+      if (!ev) return
+      const res = acp.append(ev)
+      // MVP：审计落 acp audit 表（TODO v0.1: 若 harness 收录 acp/* 词汇再 append session event）
+      if (config.debug) {
+        ctx.logger?.debug?.(`[acp] ingest ${res.decision} id=${res.id}`)
+      }
+    } catch (err) {
+      ctx.logger?.warn?.('acp ingest error: ' + (err && err.message))
     }
   })
 
