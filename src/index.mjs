@@ -3,22 +3,25 @@
 // 三角色 seam（对齐 dsh-memento 已验证模式）：
 //   Service Definition → ctx.acp（service.mjs）
 //   Provider           → SQLite Evidence Ledger（store.mjs）
-//   Consumer           → DSH hooks 接入（本文件）+ 未来 acp_* 工具
+//   Consumer           → DSH hooks 接入（本文件）
 //
-// DSH seam 映射（goldmine 核对）：
-//   session/event  → Evidence ingestion（canonical 来源，不是 pre-step 看到的 message）
-//   agent/pre-step → Context Composer + bounded injection（waterfall，必须 next()）
-//   turn/end       → enqueue background consolidation（MVP：no-op 占位）
+// DSH seam 映射（2026-08-26 真实契约校准，参照 memos DSH adapter + hooks-codex）：
+//   agent/pre-step → waterfall：await next() 拿下游决策，返回 { kind: 'enter', messages: [...决策, 注入] }
+//                    （必须返回 PreStepDecision！返回 undefined 会让 DSH 读 undefined.kind 崩 turn）
+//   session/event  → (session, event) 两参数签名；event.type 为 agent/inbox/spliced、turn/* 等
+//   turn/end       → 占位（MVP 不做 background consolidation）
 
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
-import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { isEvidenceWorthy, toEvidenceCandidate, textOfInboxMessage } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
 import { CLAIM_DOMAINS } from './constants.mjs'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
 export const inject = []
+
 export const Config = z.object({
   ledgerDir: z.string(),
   hotTokens: z.number().step(1).min(1).default(300),
@@ -27,10 +30,6 @@ export const Config = z.object({
   debug: z.boolean().default(false),
 })
 
-/**
- * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {object} config
- */
 /**
  * 作用域解析（对齐 dsh-memento 语义：user-global / workspace）。
  * MVP：单 workspace 简化，固定 user-global；v0.1 按 ctx session cwd 派生 workspace scope。
@@ -41,6 +40,20 @@ function scopeOf(ctx) {
   return 'user-global'
 }
 
+/** 从 pre-step 决策的 messages 提取用户文本（memos bridge 同款思路）。 */
+function userTextFromMessages(messages) {
+  if (!Array.isArray(messages)) return ''
+  const parts = []
+  for (const msg of messages) {
+    const content = msg?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    }
+  }
+  return parts.join(' ').trim()
+}
+
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
   const acp = createAcpService({ ledger })
@@ -49,12 +62,14 @@ export function apply(ctx, config = {}) {
   ctx.provide('acp', acp)
 
   // --- Consumer 1：session/event → Evidence ingestion ---
-  // 只消费 durable session events（user/assistant/tool/turn），幂等 append。
-  ctx.on('session/event', (event) => {
+  // 真实签名 (session, event)；只消费值得摄入的 durable events，幂等 append。
+  // fail-open：摄入异常只记日志，绝不阻断事件派发/turn。
+  ctx.on('session/event', (session, event) => {
     try {
       if (!isEvidenceWorthy(event)) return
       const ev = toEvidenceCandidate(event, {
         scopeId: scopeOf(ctx),
+        sessionId: session?.id ?? '',
         agentKey: event.agentKey ?? '',
         sessionType: event.sessionType ?? 'root',
       })
@@ -62,54 +77,53 @@ export function apply(ctx, config = {}) {
       const res = acp.append(ev)
       // MVP：审计落 acp audit 表（TODO v0.1: 若 harness 收录 acp/* 词汇再 append session event）
       if (config.debug) {
-        ctx.logger?.debug?.(`[acp] ingest ${res.decision} id=${res.id}`)
+        ctx.logger?.debug?.('[acp] ingest ' + res.decision + ' id=' + res.id)
       }
     } catch (err) {
-      ctx.logger?.warn?.('acp ingest error: ' + (err && err.message))
+      ctx.logger?.warn?.('[acp] ingest error: ' + (err && err.message))
     }
   })
 
   // --- Consumer 2：agent/pre-step → Context Composer 注入（bounded） ---
-  // waterfall：必须 next() 保留后续策略链（DSH 插件核心规则）。
-  ctx.on('agent/pre-step', (meta, next) => {
+  // 契约（2026-08-26 校准）：
+  //   payload = { agent, messages, turn, step, signal }
+  //   handler 必须返回 PreStepDecision（{kind:'reject'} | {kind:'enter', messages}）。
+  //   先 await next() 拿下游决策；仅在 step===1 且下游 enter 时把 source-labelled
+  //   注入消息追加到决策 messages 尾部（memos DSH adapter 验证过的范式）。
+  //   fail-open：任何异常都返回原决策或合法空决策，ACP 故障不得阻断 turn。
+  ctx.on('agent/pre-step', async (payload, next) => {
+    let decision
     try {
-      const scopeId = scopeOf(ctx)
-      // 候选来源：Ledger active 证据（MVP 无 Provider 时语义并入 lexical）
+      decision = await next()
+      if (payload?.step !== 1) return decision
+      if (!decision || decision.kind !== 'enter') return decision
+      const userText = userTextFromMessages(decision.messages)
       const candidates = ledger.query({
-        scopeId,
+        scopeId: scopeOf(ctx),
         state: 'active',
         limit: config.recallLimit ?? 20,
       }).items
       const result = compose(candidates, {
-        query: meta?.message ?? '',
-        scopeId,
+        query: userText,
+        scopeId: scopeOf(ctx),
         targetDomain: config.targetDomain ?? 'work',
         hasProvider: false, // MVP：无外部语义 Provider
         maxTokens: config.hotTokens ?? 300,
       })
-      if (result.items.length > 0) {
-        // source-labelled plugin message：untrusted historical context，
-        // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
-        const body = renderSourceLabelled(result.items)
-        const payload = {
-          role: 'user',
-          content: body,
-          meta: { acp: { source: 'adaptive-context', telemetry: result.telemetry } },
-        }
-        if (typeof ctx.send === 'function') {
-          ctx.send(payload)
-        } else if (typeof ctx.app === 'function' && ctx.app.session?.send) {
-          ctx.app.session.send(payload)
-        }
-      }
-      if (config.debug) {
-        ctx.logger?.debug?.(`[acp] compose: ${JSON.stringify(result.telemetry)}`)
-      }
+      if (result.items.length === 0) return decision
+      // source-labelled plugin message：untrusted historical context，
+      // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
+      const body = renderSourceLabelled(result.items)
+      const ours = createUserMessage({
+        content: [{ type: 'text', text: body }],
+        source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },
+      })
+      return { kind: 'enter', messages: [...decision.messages, ours] }
     } catch (err) {
-      // fail-open：ACP 故障不得阻断 turn
-      ctx.logger?.warn?.(`[acp] composer error: ${err?.message}`)
-    } finally {
-      next?.()
+      // fail-open：返回已有决策；若 next() 本身抛异常则给出合法空决策
+      ctx.logger?.warn?.('[acp] composer error: ' + (err && err.message))
+      if (decision) return decision
+      return { kind: 'enter', messages: [] }
     }
   })
 

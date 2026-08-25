@@ -5,12 +5,17 @@
 // 由事件类型 + 内容特征决定，保证写入时权威声明可信。
 // 幂等：contentHash = sha256(规范化文本)，sourceRef = { sessionEventId }，
 // 同一事件重放必然得到同一 Evidence id。
+//
+// 2026-08-26 真实契约校准：DSH 的真实事件是
+//   agent/inbox/spliced（用户/工具/插件消息，data.inserted[]）
+//   turn/start、turn/end、permission/*、sandbox/* 等
+// 同时保留 synthetic 测试类型（user/message、tool/result、assistant/message）。
 
 import { hashHex } from './constants.mjs'
 import { agentAuthoredAuthority } from './governance.mjs'
 
-/** 可摄入的 DSH session event 类型前缀 */
-const WORTHY_PREFIXES = ['user/', 'assistant/', 'tool/', 'turn/']
+/** 可摄入的 DSH session event 类型前缀/名称 */
+const WORTHY_PREFIXES = ['user/', 'assistant/', 'tool/', 'turn/', 'agent/inbox/spliced']
 
 /** 用户明确纠正的标记（事件类型或内容特征） */
 const CORRECTION_MARKERS = [
@@ -19,12 +24,33 @@ const CORRECTION_MARKERS = [
 ]
 
 /**
+ * 从 agent/inbox/spliced 事件的 data.inserted[] 提取文本
+ * （真实 DSH 事件：inserted = [{ content: [{type:'text',text}], source:{kind}, role, id }]）。
+ * @param {object} event
+ * @returns {string}
+ */
+export function textOfInboxMessage(event) {
+  const inserted = event?.data?.inserted
+  if (!Array.isArray(inserted)) return ''
+  const parts = []
+  for (const msg of inserted) {
+    const content = msg?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    }
+  }
+  return parts.join(' ').trim()
+}
+
+/**
  * 判断事件是否值得摄入为 Evidence。
  * @param {object} event - DSH session event
  * @returns {boolean}
  */
 export function isEvidenceWorthy(event) {
   const type = event?.type ?? ''
+  if (type === 'agent/inbox/spliced') return !!textOfInboxMessage(event)
   return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!extractText(event)
 }
 
@@ -34,8 +60,9 @@ export function isEvidenceWorthy(event) {
  * @returns {string}
  */
 export function extractText(event) {
-  const text = event?.content ?? event?.text ?? event?.message?.content ?? ''
-  return typeof text === 'string' ? text.trim() : ''
+  const direct = event?.content ?? event?.text ?? event?.message?.content
+  if (typeof direct === 'string' && direct.trim()) return direct.trim()
+  return textOfInboxMessage(event)
 }
 
 /**
@@ -45,6 +72,13 @@ export function extractText(event) {
  */
 export function sourceClassOf(event) {
   const type = event?.type ?? ''
+  if (type === 'agent/inbox/spliced') {
+    const kind = event?.data?.inserted?.[0]?.source?.kind
+    if (kind === 'user') return isCorrection(event) ? 'user_correction' : 'user_input'
+    if (kind === 'tool') return 'external_tool'
+    if (kind === 'plugin' || kind === 'agent') return 'agent_authored'
+    return 'user_input'
+  }
   if (type.startsWith('user/')) {
     return isCorrection(event) ? 'user_correction' : 'user_input'
   }
@@ -107,6 +141,7 @@ export function claimDomainOf(event) {
  * @param {object} event - DSH session event
  * @param {object} [opts]
  * @param {string} [opts.scopeId]
+ * @param {string} [opts.sessionId] - session id（真实事件用 sessionId:seq 作 sourceRef）
  * @param {string} [opts.agentKey]
  * @param {string} [opts.sessionType]
  * @returns {object|null} Evidence candidate 或 null（不可摄入时）
@@ -115,6 +150,10 @@ export function toEvidenceCandidate(event, opts = {}) {
   if (!isEvidenceWorthy(event)) return null
   const text = extractText(event)
   const sc = sourceClassOf(event)
+  // sourceRef：真实 DSH 事件有 seq（session 内唯一）无 id；synthetic 测试事件有 id
+  const eventRef = opts.sessionId && event.seq != null
+    ? opts.sessionId + ':' + event.seq
+    : (event.id ?? event.sessionEventId ?? String(event.seq ?? ''))
   return {
     sourceClass: sc,
     authority: authorityOf(event),
@@ -124,7 +163,7 @@ export function toEvidenceCandidate(event, opts = {}) {
     sensitivity: 'private',
     content: text,
     contentHash: hashHex(text),
-    sourceRef: { sessionEventId: event.id ?? event.sessionEventId },
+    sourceRef: { sessionEventId: eventRef },
     scopeId: opts.scopeId ?? 'user-global',
     agentKey: opts.agentKey ?? '',
     sessionType: opts.sessionType ?? 'root',
