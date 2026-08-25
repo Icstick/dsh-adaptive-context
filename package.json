@@ -40,7 +40,7 @@
     "typescript": "^7.0.2"
   },
   "scripts": {
-    "test": "node --test "test/*.test.mjs"",
+    "test": "node --test \"test/*.test.mjs\"",
     "lint": "oxlint",
     "typecheck": "tsc -p tsconfig.check.json"
   },
