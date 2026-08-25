@@ -14,16 +14,18 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
+import { CLAIM_DOMAINS } from './constants.mjs'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
 export const inject = []
-export const Config = {
-  ledgerDir: undefined,     // 自定义 Ledger 目录（默认 $DSH_HOME/acp）
-  hotTokens: 300,           // 每次注入 token 上限（MVP 保守值）
-  recallLimit: 20,          // 候选拉取上限
-  targetDomain: 'work',     // 目标域（readGuard 矩阵查表）
-  debug: false,
-}
+export const Config = z.object({
+  ledgerDir: z.string(),
+  hotTokens: z.number().step(1).min(1).default(300),
+  recallLimit: z.number().step(1).min(1).default(20),
+  targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
+  debug: z.boolean().default(false),
+})
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx
