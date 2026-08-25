@@ -46,7 +46,9 @@ test('explicit_correction_boost 提高 utility', () => {
 
 test('lexicalScore：CJK 子串匹配', () => {
   assert.equal(lexicalScore('包管理器', '这个项目用 pnpm 作为包管理器'), 1)
-  assert.equal(lexicalScore('包管理器', '完全无关内容'), 0.3) // 部分匹配降权
+  assert.equal(lexicalScore('包管理器', '完全无关内容'), 0) // bigram 无重叠
+  assert.ok(lexicalScore('喜欢什么风格回答', '用户喜欢详细的技术回答') > 0) // bigram 部分重叠
+  assert.equal(lexicalScore('喜欢什么风格回答', '用户喜欢详细的技术回答'), 2 / 7) // 2/7 窗口命中
 })
 
 test('sectionOf：claimDomain → section', () => {

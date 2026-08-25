@@ -18,8 +18,8 @@ const SECRET_PATTERNS = [
 
 // --- 确定性 prompt-injection 提示词（保守） ---
 const INJECTION_PATTERNS = [
-  /ignore (?:all |the )?(?:previous|prior|above|earlier) (?:instructions?|prompts?|rules?|context)/i,
-  /disregard (?:all |the )?(?:previous|prior) (?:instructions?|prompts?|rules?)/i,
+  /ignore (?:all |the |any )?(?:previous|prior|above|earlier|old) (?:instructions?|prompts?|rules?|preferences?|directives?|guidelines?|policies?|context|settings?)/i,
+  /disregard (?:all |the |any )?(?:previous|prior|above|earlier|old) (?:instructions?|prompts?|rules?|preferences?|directives?|guidelines?|policies?|context|settings?)/i,
   /you are now (?:a |an )?[^\n]{0,40}without (?:any )?(?:restrictions?|limitations?|rules?)/i,
   /system prompt:\s*[\s\S]{0,200}/i,
   /you must (?:ignore|forget|override)/i,

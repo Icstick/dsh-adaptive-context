@@ -49,9 +49,15 @@ export function lexicalScore(query, content) {
   if (!q || !c) return 0
   const tokens = q.split(/[\s\p{P}]+/u).filter((t) => t.length > 0)
   if (tokens.length === 0) return 0
-  // CJK：整串子串匹配兜底
+  // CJK：整串命中=1；否则按 bigram 重叠比例（连续 2 字符窗口）
   if (/[\u4e00-\u9fff]/.test(q)) {
-    return c.includes(q) ? 1 : 0.3 // 部分匹配降权
+    if (c.includes(q)) return 1
+    const grams = new Set()
+    for (let i = 0; i < q.length - 1; i++) grams.add(q.slice(i, i + 2))
+    if (grams.size === 0) return 0
+    let hit = 0
+    for (const g of grams) if (c.includes(g)) hit += 1
+    return hit / grams.size
   }
   let hit = 0
   for (const t of tokens) {

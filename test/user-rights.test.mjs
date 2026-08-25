@@ -34,6 +34,14 @@ test('correct 无 targetId：只记录纠正', (t) => {
   assert.equal(r.superseded, false)
 })
 
+test('写后立即读：CJK 短查询可命中刚写入的纠正（benchmark G 回归）', (t) => {
+  const { service } = fresh(t)
+  const r = service.correct({ correction: '用户喜欢详细的技术回答', sourceRef: { sessionEventId: 'g' } })
+  assert.equal(r.inserted, true)
+  const immediate = service.recall({ query: '喜欢什么风格回答', scopeId: 'user-global' })
+  assert.ok(immediate.items.some(i => i.content.includes('详细')))
+})
+
 test('export 含非 active 标注', (t) => {
   const { service } = fresh(t)
   service.append({ sourceClass: 'user_input', authority: 'user_explicit', confidence: 1, durability: 0.5, sensitivity: 'private', claimDomain: 'user_fact', content: 'x', sourceRef: { sessionEventId: 'a' } })

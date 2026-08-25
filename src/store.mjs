@@ -225,6 +225,12 @@ export function openEvidenceLedger(opts = {}) {
     if (q.authority) { conds.push('authority = ?'); params.push(q.authority) }
     if (q.sourceClass) { conds.push('source_class = ?'); params.push(q.sourceClass) }
     if (q.contentSubstr) { conds.push('content LIKE ? ESCAPE \'\\\''); params.push(`%${escapeLike(q.contentSubstr)}%`) }
+    if (Array.isArray(q.contentAnySubstr) && q.contentAnySubstr.length > 0) {
+      // OR 语义召回：任一子串命中即候选（CJK bigram / token 召回用）
+      const ors = q.contentAnySubstr.map(() => "content LIKE ? ESCAPE '\\'")
+      conds.push('(' + ors.join(' OR ') + ')')
+      for (const sub of q.contentAnySubstr) params.push(`%${escapeLike(sub)}%`)
+    }
     if (q.validAt) { conds.push('(valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until >= ?)'); params.push(q.validAt, q.validAt) }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
     const limit = Math.min(q.limit ?? 50, 200)

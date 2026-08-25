@@ -6,6 +6,24 @@ import { writeGuard, readGuard } from './governance.mjs'
 import { supersede, quarantine, redact, rollback } from './lifecycle.mjs'
 
 /**
+ * 生成 recall 的子串集合（OR 召回，CJK 友好）：
+ * - 整串（保精度）
+ * - CJK 时：连续 2 字符窗口（bigram），如 '喜欢什么风格回答' → ['喜欢','欢什','什么','么风','风格','格回','回答']
+ * - 非 CJK 时：空白/标点切 token（'package manager' → ['package','manager']）
+ */
+export function recallSubstrings(query) {
+  const q = String(query ?? '').trim()
+  if (!q) return []
+  const parts = [q]
+  if (/[\u4e00-\u9fff]/.test(q)) {
+    for (let i = 0; i < q.length - 1; i++) parts.push(q.slice(i, i + 2))
+  } else {
+    for (const t of q.split(/[\s\p{P}]+/u)) if (t) parts.push(t)
+  }
+  return [...new Set(parts)].filter((s) => s.length > 0)
+}
+
+/**
  * 构造 ctx.acp 服务。
  * @param {object} deps
  * @param {object} deps.ledger - openEvidenceLedger() 返回的 Provider
@@ -48,7 +66,8 @@ export function createAcpService({ ledger }) {
         scopeId: q.scopeId,
         state: 'active',
         limit: q.limit ?? 20,
-        contentSubstr: q.query,
+        // OR 召回：整串 + CJK bigram / token（写后立即读等短查询可命中）
+        contentAnySubstr: q.query ? recallSubstrings(q.query) : undefined,
         validAt: q.validAt,
       })
       const passed = []
