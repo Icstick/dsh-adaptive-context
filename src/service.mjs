@@ -3,7 +3,7 @@
 // 写路径经 governance.writeGuard 判定后再落 Ledger（先 validate 后 write）。
 
 import { writeGuard, readGuard } from './governance.mjs'
-import { supersede, quarantine, redact, rollback } from './lifecycle.mjs'
+import { supersede, quarantine, redact, rollback, getLineage } from './lifecycle.mjs'
 
 /**
  * 生成 recall 的子串集合（OR 召回，CJK 友好）：
@@ -58,13 +58,21 @@ export function createAcpService({ ledger }) {
     /**
      * Recall：Context Composer 的最小可用实现。
      * 1) 按 query 拉候选；2) Read Guard 过滤；3) token 预算截断。
-     * @param {object} q - { query?, scopeId?, targetDomain?, validAt?, maxTokens? }
+     *
+     * 双视图（M2 T5 temporal truth）：
+     *   - 默认 now 视图：只查 active 证据（superseded 不可召回）；
+     *   - allowSuperseded: true 时放开 query 的 state 过滤（历史/当时视图），
+     *     由 readGuard 的 allowSuperseded 分支决定 superseded 是否可见
+     *     （quarantined / redacted 无论何时都不可注入，readGuard 兜底）。
+     *
+     * @param {object} q - { query?, scopeId?, targetDomain?, validAt?, allowSuperseded?, maxTokens? }
      * @returns {{items: object[], dropped: string[], tokens: number}}
      */
     recall(q = {}) {
+      const allowSuperseded = q.allowSuperseded === true
       const cands = ledger.query({
         scopeId: q.scopeId,
-        state: 'active',
+        state: allowSuperseded ? undefined : 'active',
         limit: q.limit ?? 20,
         // OR 召回：整串 + CJK bigram / token（写后立即读等短查询可命中）
         contentAnySubstr: q.query ? recallSubstrings(q.query) : undefined,
@@ -73,7 +81,12 @@ export function createAcpService({ ledger }) {
       const passed = []
       const dropped = []
       for (const ev of cands.items) {
-        const g = readGuard(ev, { scopeId: q.scopeId, targetDomain: q.targetDomain, validAt: q.validAt })
+        const g = readGuard(ev, {
+          scopeId: q.scopeId,
+          targetDomain: q.targetDomain,
+          validAt: q.validAt,
+          allowSuperseded,
+        })
         if (g.allowed) passed.push(ev)
         else dropped.push(`${ev.id}:${g.reasons.join(';')}`)
       }
@@ -88,6 +101,20 @@ export function createAcpService({ ledger }) {
         items.push(ev)
       }
       return { items, dropped, tokens }
+    },
+
+    /**
+     * history：回溯证据演进历史（双视图之"当时视图"，M2 T5）。
+     * 沿 supersedes 直接前驱回溯，返回 [最旧 ... 最新] 的有序 id 数组（含 id 自己）；
+     * 与 getLineage(id, { ledger }) 语义一致（演进历史不冗余存储，CONTRACTS.md §1）。
+     *
+     * @param {string} id - 证据 id（通常为当前生效的最新一条）
+     * @returns {string[]|null} lineage id 数组；id 不存在 / 非字符串返回 null
+     */
+    history(id) {
+      if (typeof id !== 'string' || id.length === 0) return null
+      if (!ledger.getById(id)) return null
+      return getLineage(id, { ledger })
     },
 
     /** 统计 */
