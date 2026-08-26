@@ -13,6 +13,7 @@
 
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
+import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate, textOfInboxMessage } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
 import { CLAIM_DOMAINS } from './constants.mjs'
@@ -57,9 +58,15 @@ function userTextFromMessages(messages) {
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
   const acp = createAcpService({ ledger })
+  const expression = createExpression({ ledger })
 
   // --- Service Definition：注册 ctx.acp ---
-  ctx.provide('acp', acp)
+  // T6 桥：acp.requestPromotion(candidate, ctx) 兼容两参调用（C 组接缝）。
+  // approval 走 withService 可选模式——inject 列表不加 'approval'。
+  ctx.provide('acp', {
+    ...acp,
+    requestPromotion: (candidate, ctxArg) => expression.requestPromotion(candidate, ctxArg ?? ctx),
+  })
 
   // --- Consumer 1：session/event → Evidence ingestion ---
   // 真实签名 (session, event)；只消费值得摄入的 durable events，幂等 append。
