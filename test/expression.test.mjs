@@ -190,6 +190,8 @@ test('index.mjs：acp 桥含 requestPromotion 且 inject 不加 approval', () =>
   assert.ok(src.includes('requestPromotion'))
   // 桥必须兼容两参调用（C 组接缝）
   assert.ok(src.includes('requestPromotion: (candidate, ctxArg) => expression.requestPromotion'))
-  // inject 列表保持空（approval 走 withService 可选模式）
-  assert.ok(src.includes('export const inject = []'))
+  // inject 行不含 approval（approval 走 withService 可选模式；T4 起含 'llm'）
+  const injectLine = src.match(/export const inject = (\[[^\]]*\])/)?.[1] ?? ''
+  assert.ok(!injectLine.includes('approval'))
+  assert.ok(injectLine.includes('llm'))
 })
