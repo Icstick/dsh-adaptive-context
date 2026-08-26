@@ -122,7 +122,7 @@ async function callLlmText(llm, { provider, model, maxTokens, timeoutMs }, userT
       maxTokens,
       temperature: 0,
       signal: controller.signal,
-      purpose: 'acp-consolidation',
+      purpose: 'compaction', // GenerateOptions 联合类型只有 compaction|session-title
     })) {
       assembler.push(chunk)
     }
