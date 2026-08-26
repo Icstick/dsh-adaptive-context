@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const DEFAULT_DB_NAME = 'acp-ledger.db'
 
 /** Evidence 状态机 */
@@ -13,6 +13,18 @@ export const EVIDENCE_STATES = Object.freeze([
   'superseded',  // 被新证据替代（不物理删除）
   'redacted',    // 内容被脱敏
 ])
+
+/** Observation 状态机（派生认知，可版本化；冲突 supersede 只翻转 state） */
+export const OBSERVATION_STATES = Object.freeze([
+  'active',      // 当前生效版本
+  'superseded',  // 被同键新 Observation 替代（不物理删除）
+])
+
+/** Observation 正文（浓缩认知）上限（字符）；原始大内容留在 Evidence（8000） */
+export const MAX_OBSERVATION_TEXT_CHARS = 500
+
+/** 规则兜底 Observation.subject 截断长度（内容前 N 字符） */
+export const MAX_OBSERVATION_SUBJECT_CHARS = 40
 
 /** 来源分类：决定写入时的权威约束 */
 export const SOURCE_CLASSES = Object.freeze([
@@ -66,6 +78,12 @@ export const SCOPES = Object.freeze([
   'user-global',
   'workspace',
 ])
+
+/** Background consolidation 节流（决策 2B：未消化 ≥10 条 或 距上次 ≥5 turn） */
+export const CONSOLIDATION_MIN_EVIDENCE = 10
+export const CONSOLIDATION_MIN_TURNS = 5
+export const CONSOLIDATION_META_WATERMARK_TS = 'consolidation_watermark_ts'
+export const CONSOLIDATION_META_TURN_COUNT = 'consolidation_turn_count'
 
 /** 错误码 */
 export const ERROR_CODES = Object.freeze({

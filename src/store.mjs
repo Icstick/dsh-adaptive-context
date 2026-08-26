@@ -9,8 +9,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import {
-  SCHEMA_VERSION, EVIDENCE_STATES, AUTHORITIES, SOURCE_CLASSES,
+  SCHEMA_VERSION, EVIDENCE_STATES, OBSERVATION_STATES, AUTHORITIES, SOURCE_CLASSES,
   CLAIM_DOMAINS, SENSITIVITIES, SCOPES, SESSION_TYPES,
+  MAX_OBSERVATION_TEXT_CHARS,
   evidenceIdOf, hashHex,
 } from './constants.mjs'
 import { assertAuthorityConsistent } from './governance.mjs'
@@ -72,6 +73,24 @@ CREATE TABLE IF NOT EXISTS evidence (
 CREATE INDEX IF NOT EXISTS idx_evidence_scope_state ON evidence (scope_id, state);
 CREATE INDEX IF NOT EXISTS idx_evidence_content_hash ON evidence (content_hash);
 CREATE INDEX IF NOT EXISTS idx_evidence_observed_at ON evidence (observed_at);
+
+CREATE TABLE IF NOT EXISTS observation (
+  id            TEXT PRIMARY KEY,
+  scope_id      TEXT NOT NULL,
+  subject       TEXT NOT NULL,
+  predicate     TEXT NOT NULL,
+  claim_domain  TEXT NOT NULL,
+  text          TEXT NOT NULL,
+  evidence_ids  TEXT NOT NULL DEFAULT '[]',  -- JSON array
+  supersedes    TEXT NOT NULL DEFAULT '[]',  -- JSON array（方案甲：直接前驱）
+  state         TEXT NOT NULL DEFAULT 'active',
+  observed_at   TEXT NOT NULL,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_observation_scope ON observation (scope_id);
+CREATE INDEX IF NOT EXISTS idx_observation_claim_domain ON observation (claim_domain);
+CREATE INDEX IF NOT EXISTS idx_observation_key ON observation (scope_id, subject, predicate, claim_domain);
 `
 
 function assertChoice(value, allowed, label) {
@@ -93,12 +112,15 @@ export function openEvidenceLedger(opts = {}) {
   db.exec(PRAGMAS)
   db.exec(SCHEMA)
   const existing = db.prepare('SELECT value FROM acp_meta WHERE key = ?').get('schema_version')
-  if (existing && Number(existing.value) !== SCHEMA_VERSION) {
+  const existingVersion = existing ? Number(existing.value) : 0
+  if (existingVersion > SCHEMA_VERSION) {
     db.close()
     throw new Error(`ACP ledger schema mismatch: db=${existing.value} expected=${SCHEMA_VERSION}`)
   }
-  if (!existing) {
-    db.prepare('INSERT OR IGNORE INTO acp_meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION))
+  if (existingVersion !== SCHEMA_VERSION) {
+    // 迁移：v1 → v2 只新增 observation 表（SCHEMA 已 CREATE TABLE IF NOT EXISTS），
+    // 不破坏 evidence 表；新库亦走此路径写入当前版本号。
+    db.prepare('INSERT OR REPLACE INTO acp_meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION))
   }
 
   const insertStmt = db.prepare(`
@@ -263,6 +285,140 @@ export function openEvidenceLedger(opts = {}) {
     return { total: r.total ?? 0, active: r.active ?? 0, quarantined: r.quarantined ?? 0, superseded: r.superseded ?? 0 }
   }
 
+  // ===================== meta 水位（consolidation 节流用） =====================
+
+  function getMeta(key) {
+    const r = db.prepare('SELECT value FROM acp_meta WHERE key = ?').get(key)
+    return r ? r.value : null
+  }
+
+  function setMeta(key, value) {
+    db.prepare('INSERT OR REPLACE INTO acp_meta (key, value) VALUES (?, ?)').run(key, String(value))
+  }
+
+  // ===================== Observation（可版本化派生认知） =====================
+  // 冲突检测键 = scope_id + subject + predicate + claim_domain。
+  // 冲突 supersede 语义（方案甲，CONTRACTS.md §8）：
+  //   同键新 Observation 写入 → 旧行 state='superseded'，新行 supersedes=[旧 id]。
+  //   supersedes 属于替代者一侧——"新 observation 替代了谁"，不是被替代者记新 id。
+  //   getObservationLineage(id) 沿 supersedes 回溯得到 [最旧 ... 最新]。
+
+  const insertObservationStmt = db.prepare(`
+    INSERT OR IGNORE INTO observation (
+      id, scope_id, subject, predicate, claim_domain, text, evidence_ids, supersedes, state, observed_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  /** 稳定派生 id：同键 + 同正文 + 同证据集重派生天然幂等（重复写不产生新行） */
+  function observationIdOf({ scopeId, subject, predicate, claimDomain, text, evidenceIds }) {
+    return 'obs_' + hashHex([
+      scopeId, subject, predicate, claimDomain, text, JSON.stringify(evidenceIds ?? []),
+    ].join('|')).slice(0, 24)
+  }
+
+  /**
+   * 写入/更新一条 Observation（冲突 supersede）。
+   * @param {object} input - { scopeId?, subject, predicate, claimDomain, text, evidenceIds?, id?, observedAt? }
+   * @returns {{inserted: boolean, id: string, row: object|null, supersededId: string|null}}
+   */
+  function upsertObservation(input) {
+    assertChoice(input.claimDomain, CLAIM_DOMAINS, 'claimDomain')
+    const scopeId = input.scopeId ?? 'user-global'
+    assertChoice(scopeId, SCOPES, 'scopeId')
+    if (input.state && !OBSERVATION_STATES.includes(input.state)) {
+      throw new TypeError(`observation state must be one of ${OBSERVATION_STATES.join('|')}`)
+    }
+    const subject = String(input.subject ?? '').trim()
+    const predicate = String(input.predicate ?? '').trim()
+    if (!subject || !predicate) {
+      throw new TypeError('observation subject and predicate must be non-empty')
+    }
+    let text = String(input.text ?? '')
+    if (!text) throw new TypeError('observation text must be non-empty')
+    if (text.length > MAX_OBSERVATION_TEXT_CHARS) text = text.slice(0, MAX_OBSERVATION_TEXT_CHARS)
+    const claimDomain = input.claimDomain
+    const evidenceIds = Array.isArray(input.evidenceIds) ? input.evidenceIds.map(String) : []
+    const id = input.id ?? observationIdOf({ scopeId, subject, predicate, claimDomain, text, evidenceIds })
+
+    // 幂等：同 id（同键+同正文+同证据）重写直接返回，不自 supersede
+    const byId = db.prepare('SELECT * FROM observation WHERE id = ?').get(id)
+    if (byId) return { inserted: false, id, row: toObservation(byId), supersededId: null }
+
+    // 冲突：同键且 active 的旧行
+    const conflict = db.prepare(`
+      SELECT id FROM observation
+      WHERE scope_id = ? AND subject = ? AND predicate = ? AND claim_domain = ? AND state = 'active'
+    `).get(scopeId, subject, predicate, claimDomain)
+
+    let supersedes = []
+    let supersededId = null
+    if (conflict) {
+      db.prepare(`UPDATE observation SET state = 'superseded' WHERE id = ?`).run(conflict.id)
+      supersedes = [conflict.id]
+      supersededId = conflict.id
+    }
+
+    insertObservationStmt.run(
+      id, scopeId, subject, predicate, claimDomain, text,
+      JSON.stringify(evidenceIds), JSON.stringify(supersedes), 'active',
+      input.observedAt ?? new Date().toISOString(), Date.now(),
+    )
+    return { inserted: true, id, row: getObservationById(id), supersededId }
+  }
+
+  function getObservationById(id) {
+    const r = db.prepare('SELECT * FROM observation WHERE id = ?').get(id)
+    return r ? toObservation(r) : null
+  }
+
+  /**
+   * 查询 Observation（read-only）。支持 scope/state/claimDomain/subject/predicate 过滤。
+   * @param {object} q
+   * @returns {{items: object[], total: number}}
+   */
+  function queryObservation(q = {}) {
+    const conds = []
+    const params = []
+    if (q.scopeId) { conds.push('scope_id = ?'); params.push(q.scopeId) }
+    if (q.state) { conds.push('state = ?'); params.push(q.state) }
+    if (q.claimDomain) { conds.push('claim_domain = ?'); params.push(q.claimDomain) }
+    if (q.subject) { conds.push('subject = ?'); params.push(q.subject) }
+    if (q.predicate) { conds.push('predicate = ?'); params.push(q.predicate) }
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
+    const limit = Math.min(q.limit ?? 50, 200)
+    const rows = db.prepare(`SELECT * FROM observation ${where} ORDER BY created_at ASC LIMIT ?`).all(...params, limit)
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM observation ${where}`).get(...params).c
+    return { items: rows.map(toObservation), total }
+  }
+
+  /** 全部 active Observation（供快照/导出） */
+  function listObservations(scopeId) {
+    const rows = scopeId
+      ? db.prepare('SELECT * FROM observation WHERE state = ? AND scope_id = ? ORDER BY created_at ASC').all('active', scopeId)
+      : db.prepare('SELECT * FROM observation WHERE state = ? ORDER BY created_at ASC').all('active')
+    return rows.map(toObservation)
+  }
+
+  /** 演进历史：[最旧 ... 最新]（沿 supersedes 直接前驱回溯，含 id 自己） */
+  function getObservationLineage(id) {
+    if (!getObservationById(id)) throw new Error(`observation '${id}' not found`)
+    const collected = []
+    const seen = new Set()
+    const walk = (obs) => {
+      if (seen.has(obs.id)) return
+      seen.add(obs.id)
+      for (const prevId of obs.supersedes ?? []) {
+        const prev = getObservationById(prevId)
+        if (!prev) continue // 悬挂引用容忍
+        walk(prev)
+      }
+      collected.push(obs.id)
+    }
+    walk(getObservationById(id))
+    const createdAt = new Map(collected.map((oid) => [oid, getObservationById(oid).createdAt]))
+    return collected.slice().sort((a, b) => createdAt.get(a) - createdAt.get(b))
+  }
+
   let closed = false
   function close() {
     if (closed) return // 幂等：重复 close 是 no-op
@@ -270,7 +426,13 @@ export function openEvidenceLedger(opts = {}) {
     db.close()
   }
 
-  return { db, dbPath, append, getById, setState, updateMetadata, query, byContentHash, listActive, stats, close }
+  return {
+    db, dbPath,
+    append, getById, setState, updateMetadata, query, byContentHash, listActive, stats,
+    getMeta, setMeta,
+    upsertObservation, getObservationById, queryObservation, listObservations, getObservationLineage,
+    close,
+  }
 }
 
 function toEvidence(r) {
@@ -301,4 +463,20 @@ function toEvidence(r) {
 
 function escapeLike(s) {
   return s.replace(/[\\%_]/g, (m) => '\\' + m)
+}
+
+function toObservation(r) {
+  return {
+    id: r.id,
+    scopeId: r.scope_id,
+    subject: r.subject,
+    predicate: r.predicate,
+    claimDomain: r.claim_domain,
+    text: r.text,
+    evidenceIds: JSON.parse(r.evidence_ids),
+    supersedes: JSON.parse(r.supersedes),
+    state: r.state,
+    observedAt: r.observed_at,
+    createdAt: r.created_at,
+  }
 }
