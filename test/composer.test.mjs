@@ -76,3 +76,28 @@ test('renderSourceLabelled：带来源标签', () => {
 test('estimateTokens 中文估算', () => {
   assert.equal(estimateTokens('你好世界'), Math.ceil(4 * 0.7))
 })
+
+test('compose validAt 过滤：过期候选被 readGuard 拒绝（expired）', () => {
+  const r = compose([
+    ev({ id: 't1', content: '2026 上半年规则', validFrom: '2026-01-01T00:00:00.000Z', validUntil: '2026-06-01T00:00:00.000Z' }),
+    ev({ id: 't2', content: '2026 下半年规则' }),
+  ], { query: '规则', scopeId: 'user-global', validAt: '2026-09-01T00:00:00.000Z' })
+  assert.equal(r.items.length, 1)
+  assert.equal(r.items[0].id, 't2')
+  assert.ok(r.dropped.some(d => d.id === 't1' && d.reason.includes('expired')))
+})
+
+test('compose validAt 过滤：未生效候选被拒绝（not yet valid）', () => {
+  const r = compose([
+    ev({ id: 'f', content: '未来才生效的规则', validFrom: '2026-10-01T00:00:00.000Z' }),
+  ], { query: '规则', scopeId: 'user-global', validAt: '2026-09-01T00:00:00.000Z' })
+  assert.equal(r.items.length, 0)
+  assert.ok(r.dropped.some(d => d.id === 'f' && d.reason.includes('not yet valid')))
+})
+
+test('compose 未传 validAt：不施加 temporal 过滤（now 视图默认）', () => {
+  const r = compose([
+    ev({ id: 'e', content: '旧规则', validUntil: '2026-06-01T00:00:00.000Z' }),
+  ], { query: '规则', scopeId: 'user-global' })
+  assert.equal(r.items.length, 1)
+})
