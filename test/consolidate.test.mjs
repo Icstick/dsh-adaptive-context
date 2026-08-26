@@ -1,0 +1,313 @@
+// test/consolidate.test.mjs — Background consolidation（P1-4）验收测试。
+// 决策 2B（节流）/ 3A（LLM 主 + 规则兜底）/ 4（observation 冲突 supersede）/ 5（style 接缝）。
+// LLM 调用抽成可注入 llmCall，测试传 mock。
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { openEvidenceLedger } from '../src/store.mjs'
+import {
+  createConsolidator, parseObservations, ruleObservationFor, buildConsolidationPrompt,
+} from '../src/consolidate.mjs'
+
+function freshLedger(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-cons-'))
+  const ledger = openEvidenceLedger({ dir })
+  t.after(() => { ledger.close(); rmSync(dir, { recursive: true, force: true }) })
+  return ledger
+}
+
+function baseEv(i, overrides = {}) {
+  return {
+    sourceClass: 'user_input',
+    authority: 'user_explicit',
+    confidence: 0.9,
+    durability: 0.5,
+    sensitivity: 'private',
+    claimDomain: 'user_fact',
+    content: '用户偏好 pnpm ' + i,
+    observedAt: new Date(Date.UTC(2026, 7, 25, 0, 0, i)).toISOString(),
+    sourceRef: { sessionEventId: 'e-' + i },
+    ...overrides,
+  }
+}
+
+function addEvidence(ledger, n) {
+  for (let i = 1; i <= n; i++) ledger.append(baseEv(i))
+}
+
+// ===================== 决策 2B：节流 =====================
+
+test('节流：证据 <10 且 turn <5 不触发；turn 达标触发（规则兜底）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 3)
+  const c = createConsolidator({ ledger, minEvidence: 10, minTurns: 5, llmCall: null })
+
+  assert.equal(c.shouldRun(), false)
+
+  // turn 1..4：都不触发（证据 3 < 10 且 turn < 5）
+  for (let i = 1; i <= 4; i++) {
+    const r = c.enqueue()
+    assert.equal(r.queued, false)
+    assert.equal(r.reason, 'throttle')
+    assert.equal(c.readTurnCount(), i)
+  }
+
+  // 第 5 个 turn：触发
+  const r5 = c.enqueue()
+  assert.equal(r5.queued, true)
+  await c.awaitIdle()
+
+  // 规则兜底：3 条证据 → 3 条 observation；turn 计数清零
+  assert.equal(ledger.queryObservation({ scopeId: 'user-global' }).total, 3)
+  assert.equal(c.readTurnCount(), 0)
+})
+
+test('节流：未消化证据 ≥10 立即触发（不等 turn）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 10)
+  const c = createConsolidator({ ledger, minEvidence: 10, minTurns: 5, llmCall: null })
+
+  assert.equal(c.shouldRun(), true)
+  const r = c.enqueue()
+  assert.equal(r.queued, true)
+  await c.awaitIdle()
+  assert.equal(ledger.queryObservation({}).total, 10)
+})
+
+// ===================== 队列背压 =====================
+
+test('队列背压：已有 pending 任务时新任务丢弃', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 1)
+
+  let release
+  const gate = new Promise((res) => { release = res })
+  const llmCall = async () => {
+    await gate
+    return JSON.stringify({ observations: [
+      { subject: '包管理器', predicate: '选择', claimDomain: 'work', text: '用 pnpm', evidenceIds: ['e1'] },
+    ] })
+  }
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+
+  const r1 = c.enqueue()
+  assert.equal(r1.queued, true)
+  assert.equal(c.isPending(), true)
+
+  // 在途未完成时再次入队 → 背压丢弃
+  const r2 = c.enqueue()
+  assert.equal(r2.queued, false)
+  assert.equal(r2.reason, 'backpressure')
+
+  release()
+  await c.awaitIdle()
+  assert.equal(c.isPending(), false)
+})
+
+// ===================== 决策 3A：LLM 派生 / 规则兜底 =====================
+
+test('LLM 成功：解析 JSON 生成 observations', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '包管理器', predicate: '选择', claimDomain: 'user_preference', text: '用户偏好 pnpm', evidenceIds: ['e1', 'e2'] },
+    ],
+  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  const r = await c.runOnce()
+
+  assert.equal(r.observations, 1)
+  const obs = ledger.queryObservation({})
+  assert.equal(obs.total, 1)
+  const o = obs.items[0]
+  assert.equal(o.subject, '包管理器')
+  assert.equal(o.claimDomain, 'user_preference')
+  assert.deepEqual(o.evidenceIds, ['e1', 'e2'])
+})
+
+test('LLM 抛错：重试 1 次后丢弃该批（不落规则兜底）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 3)
+  let calls = 0
+  const llmCall = async () => { calls += 1; throw new Error('boom') }
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  const r = await c.runOnce()
+
+  assert.equal(calls, 2) // 初次 + 1 次重试
+  assert.equal(r.observations, 0)
+  assert.equal(ledger.queryObservation({}).total, 0) // 丢弃，不产生 observation
+})
+
+test('LLM 输出非法 JSON：重试 1 次后丢弃', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  let calls = 0
+  const llmCall = async () => { calls += 1; return 'not-json' }
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  await c.runOnce()
+
+  assert.equal(calls, 2)
+  assert.equal(ledger.queryObservation({}).total, 0)
+})
+
+test('llm 缺失：走规则兜底（每证据一条 observation）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 3)
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall: null })
+  await c.runOnce()
+
+  const obs = ledger.queryObservation({})
+  assert.equal(obs.total, 3)
+  for (const o of obs.items) {
+    assert.equal(o.predicate, 'states')
+    assert.equal(o.evidenceIds.length, 1)
+    assert.ok(o.subject.length <= 40)
+  }
+})
+
+// ===================== 决策 4：observation 冲突 supersede + lineage =====================
+
+test('冲突：同键新 Observation → 旧 superseded + lineage（方案甲）', (t) => {
+  const ledger = freshLedger(t)
+  const a = ledger.upsertObservation({
+    subject: '包管理器', predicate: '选择', claimDomain: 'user_preference', text: '用户喜欢 pnpm', evidenceIds: ['e1'],
+  })
+  const b = ledger.upsertObservation({
+    subject: '包管理器', predicate: '选择', claimDomain: 'user_preference', text: '用户改用 Bun', evidenceIds: ['e2'],
+  })
+
+  assert.equal(a.inserted, true)
+  assert.equal(b.inserted, true)
+  assert.equal(b.supersededId, a.id)
+
+  const oldRow = ledger.getObservationById(a.id)
+  const newRow = ledger.getObservationById(b.id)
+  assert.equal(oldRow.state, 'superseded')
+  assert.equal(newRow.state, 'active')
+  // 方案甲：supersedes 属于替代者一侧 → 新行 [旧 id]
+  assert.deepEqual(newRow.supersedes, [a.id])
+  // lineage：[最旧 ... 最新]
+  assert.deepEqual(ledger.getObservationLineage(b.id), [a.id, b.id])
+
+  // 幂等：同键同正文同证据重写不自 supersede
+  const c = ledger.upsertObservation({
+    subject: '包管理器', predicate: '选择', claimDomain: 'user_preference', text: '用户改用 Bun', evidenceIds: ['e2'],
+  })
+  assert.equal(c.inserted, false)
+  assert.equal(c.id, b.id)
+  assert.equal(ledger.getObservationById(a.id).state, 'superseded')
+})
+
+test('不同键（predicate/claimDomain 不同）不冲突，两条都 active', (t) => {
+  const ledger = freshLedger(t)
+  ledger.upsertObservation({ subject: '包管理器', predicate: '选择', claimDomain: 'user_preference', text: 'A', evidenceIds: ['e1'] })
+  ledger.upsertObservation({ subject: '包管理器', predicate: '选择', claimDomain: 'work', text: 'B', evidenceIds: ['e2'] })
+  const items = ledger.queryObservation({ state: 'active' }).items
+  assert.equal(items.length, 2)
+})
+
+// ===================== 决策 5：style 候选接缝（requestPromotion） =====================
+
+test('接缝：claimDomain==="style" 候选触发 promoteCandidate，其余不触发', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 1)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '语气', predicate: '偏好', claimDomain: 'style', text: '喜欢简洁', evidenceIds: ['e1'] },
+      { subject: '包管理器', predicate: '选择', claimDomain: 'work', text: '用 pnpm', evidenceIds: ['e2'] },
+    ],
+  })
+  const promoted = []
+  const c = createConsolidator({
+    ledger, minEvidence: 1, minTurns: 100, llmCall,
+    promoteCandidate: (cand) => { promoted.push(cand) },
+  })
+  await c.runOnce()
+
+  assert.equal(promoted.length, 1)
+  assert.equal(promoted[0].claimDomain, 'style')
+  assert.equal(promoted[0].subject, '语气')
+})
+
+test('接缝：promoteCandidate 抛异常不阻断 consolidation（fail-open）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 1)
+  const llmCall = async () => JSON.stringify({
+    observations: [{ subject: '语气', predicate: '偏好', claimDomain: 'style', text: 'x', evidenceIds: ['e1'] }],
+  })
+  const c = createConsolidator({
+    ledger, minEvidence: 1, minTurns: 100, llmCall,
+    promoteCandidate: () => { throw new Error('boom') },
+  })
+  const r = await c.runOnce() // 不应抛
+  assert.equal(r.observations, 1)
+})
+
+// ===================== 纯函数：解析 / 规则兜底 / prompt =====================
+
+test('parseObservations：容忍 markdown fence + 前后杂文，过滤非法条目', () => {
+  const raw = 'Here is the result:\n```json\n{"observations":[{"subject":"a","predicate":"b","claimDomain":"work","text":"c","evidenceIds":["e1"]},{"subject":"","predicate":"","claimDomain":"bad","text":"","evidenceIds":[]}]}\n```'
+  const r = parseObservations(raw)
+  assert.equal(r.ok, true)
+  assert.equal(r.observations.length, 1) // 非法条目被过滤
+  assert.equal(r.observations[0].subject, 'a')
+  assert.equal(parseObservations('nope').ok, false)
+  assert.equal(parseObservations('').ok, false)
+})
+
+test('ruleObservationFor：subject=内容前 40 字符，text 截断 500', () => {
+  const ev = { id: 'e1', claimDomain: 'work', content: 'x'.repeat(100) }
+  const o = ruleObservationFor(ev)
+  assert.equal(o.subject.length, 40)
+  assert.equal(o.predicate, 'states')
+  assert.equal(o.text.length, 100) // ≤500，未超
+  assert.deepEqual(o.evidenceIds, ['e1'])
+})
+
+test('buildConsolidationPrompt：system 含 JSON 契约，user 含证据 JSON', () => {
+  const { system, userText } = buildConsolidationPrompt([{ id: 'e1', claimDomain: 'work', content: '用 pnpm' }])
+  assert.ok(system.includes('observations'))
+  assert.ok(system.includes('claimDomain'))
+  assert.ok(userText.includes('e1'))
+  assert.ok(userText.includes('用 pnpm'))
+})
+
+// ===================== schema v2 迁移 =====================
+
+test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移且不破坏 evidence', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-mig-'))
+  try {
+    // 造一个完整 v2 库并插入一条证据，然后退化为 v1（删 observation、版本回 1）
+    const seed = openEvidenceLedger({ dir })
+    seed.append({
+      sourceClass: 'user_input', authority: 'user_explicit', confidence: 0.9, durability: 0.5,
+      sensitivity: 'private', claimDomain: 'user_fact', content: '旧证据', sourceRef: { sessionEventId: 'old' },
+    })
+    seed.close()
+    const raw = new DatabaseSync(path.join(dir, 'acp-ledger.db'))
+    raw.exec('DROP TABLE observation')
+    raw.exec("UPDATE acp_meta SET value = '1' WHERE key = 'schema_version'")
+    raw.close()
+
+    // 重新打开 → 迁移到 v2
+    const ledger = openEvidenceLedger({ dir })
+    try {
+      assert.equal(
+        ledger.db.prepare("SELECT value FROM acp_meta WHERE key = 'schema_version'").get().value,
+        '2',
+      )
+      assert.ok(ledger.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observation'").get())
+      const items = ledger.query({ scopeId: 'user-global' }).items
+      assert.equal(items.length, 1)
+      assert.equal(items[0].content, '旧证据')
+    } finally {
+      ledger.close()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -9,18 +9,21 @@
 //   agent/pre-step → waterfall：await next() 拿下游决策，返回 { kind: 'enter', messages: [...决策, 注入] }
 //                    （必须返回 PreStepDecision！返回 undefined 会让 DSH 读 undefined.kind 崩 turn）
 //   session/event  → (session, event) 两参数签名；event.type 为 agent/inbox/spliced、turn/* 等
-//   turn/end       → 占位（MVP 不做 background consolidation）
+//   turn/end       → session/event 内 event.type==='turn/end' 时入队 background consolidation
 
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
-import { isEvidenceWorthy, toEvidenceCandidate, textOfInboxMessage } from './extract.mjs'
+import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
-import { CLAIM_DOMAINS } from './constants.mjs'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import {
+  CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
+} from './constants.mjs'
+import { createConsolidator } from './consolidate.mjs'
+import { createUserMessage, BlockAssembler } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
-export const inject = []
+export const inject = ['llm']
 
 export const Config = z.object({
   ledgerDir: z.string(),
@@ -28,6 +31,13 @@ export const Config = z.object({
   recallLimit: z.number().step(1).min(1).default(20),
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
   debug: z.boolean().default(false),
+  // Background consolidation（可选：缺省用 constants 默认；llm 路由缺省则走规则兜底）
+  consolidationMinEvidence: z.number().step(1).min(1),
+  consolidationMinTurns: z.number().step(1).min(1),
+  consolidationProvider: z.string(),
+  consolidationModel: z.string(),
+  consolidationMaxTokens: z.number().step(1).min(1),
+  consolidationTimeoutMs: z.number().step(1).min(1),
 })
 
 /**
@@ -36,7 +46,7 @@ export const Config = z.object({
  * @param {object} ctx
  * @returns {string} scopeId（SCOPES 之一）
  */
-function scopeOf(ctx) {
+function scopeOf(_ctx) {
   return 'user-global'
 }
 
@@ -54,6 +64,48 @@ function userTextFromMessages(messages) {
   return parts.join(' ').trim()
 }
 
+/**
+ * 用 DSH llm 服务做一次纯文本生成（consolidation 专用）。
+ * 参考 @deepseek-ai/dsh-session-title-llm 的 BlockAssembler 流式收集范式。
+ * 失败（finish 非 stop / 无文本）向上抛——由 consolidate.mjs 的 deriveViaLlm 重试/丢弃。
+ */
+async function callLlmText(llm, { provider, model, maxTokens, timeoutMs }, userText, system) {
+  const messages = [createUserMessage({
+    content: [{ type: 'text', text: userText }],
+    source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'consolidation' },
+  })]
+  const controller = new AbortController()
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const assembler = new BlockAssembler()
+    for await (const chunk of llm.stream({
+      provider,
+      model,
+      messages,
+      system,
+      maxTokens,
+      temperature: 0,
+      signal: controller.signal,
+      purpose: 'acp-consolidation',
+    })) {
+      assembler.push(chunk)
+    }
+    const finish = assembler.finish
+    if (finish && finish.reason?.kind && finish.reason.kind !== 'stop') {
+      throw new Error('acp consolidation llm finished with ' + finish.reason.kind)
+    }
+    const text = assembler.blocks()
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim()
+    if (!text) throw new Error('acp consolidation llm produced no text')
+    return text
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
   const acp = createAcpService({ ledger })
@@ -61,11 +113,64 @@ export function apply(ctx, config = {}) {
   // --- Service Definition：注册 ctx.acp ---
   ctx.provide('acp', acp)
 
-  // --- Consumer 1：session/event → Evidence ingestion ---
+  // --- Background consolidation：LLM 用 withService 可选模式获取 ---
+  function resolveLlm() {
+    try { return ctx.get('llm') } catch { return undefined }
+  }
+
+  const minEvidence = config.consolidationMinEvidence ?? CONSOLIDATION_MIN_EVIDENCE
+  const minTurns = config.consolidationMinTurns ?? CONSOLIDATION_MIN_TURNS
+  const consolidationMaxTokens = config.consolidationMaxTokens ?? 1024
+  const consolidationTimeoutMs = config.consolidationTimeoutMs ?? 30000
+
+  /** llm 缺失或未配置 provider/model → null（consolidator 走规则兜底） */
+  function buildLlmCall() {
+    const llm = resolveLlm()
+    const provider = config.consolidationProvider
+    const model = config.consolidationModel
+    if (!llm || !provider || !model) return null
+    return (userText, system) => callLlmText(llm, {
+      provider, model, maxTokens: consolidationMaxTokens, timeoutMs: consolidationTimeoutMs,
+    }, userText, system)
+  }
+
+  const consolidate = createConsolidator({
+    ledger,
+    scopeId: scopeOf(ctx),
+    llmCall: buildLlmCall(),
+    minEvidence,
+    minTurns,
+    logger: ctx.logger,
+    // style 候选接缝（固定接口，T6 Expression promotion 预留）
+    // 接缝（固定接口，T6 Expression promotion 预留）：
+    // style 候选 → 若 ctx.acp 有 requestPromotion 方法则调用，必须不抛异常；无则跳过。
+    promoteCandidate: (candidate) => {
+      try {
+        const acpService = ctx.get('acp')
+        if (acpService && typeof acpService.requestPromotion === 'function') {
+          acpService.requestPromotion(candidate, ctx)
+        }
+      } catch (err) {
+        ctx.logger?.warn?.('[acp] requestPromotion error: ' + (err && err.message))
+      }
+    },
+  })
+
+  // llm 服务重挂载时重建调用闭包（withService 模式，踩坑清单第 5 条）
+  ctx.on('internal/service', (name) => {
+    if (name === 'llm') consolidate.setLlmCall(buildLlmCall())
+  })
+
+  // --- Consumer 1：session/event → Evidence ingestion + turn/end 入队 ---
   // 真实签名 (session, event)；只消费值得摄入的 durable events，幂等 append。
   // fail-open：摄入异常只记日志，绝不阻断事件派发/turn。
   ctx.on('session/event', (session, event) => {
     try {
+      // turn/end：入队 background consolidation（fire-and-forget，不 await）
+      if (event?.type === 'turn/end') {
+        consolidate.enqueue()
+        return
+      }
       if (!isEvidenceWorthy(event)) return
       const ev = toEvidenceCandidate(event, {
         scopeId: scopeOf(ctx),
@@ -127,13 +232,7 @@ export function apply(ctx, config = {}) {
     }
   })
 
-  // --- Consumer 3：turn/end → 后台 consolidation 入队（MVP 占位） ---
-  ctx.on('turn/end', () => {
-    // TODO(v0.1)：per-scope serial queue + batch consolidate（Observation/Profile 派生）
-    // MVP 不做：热路径零 reflection。
-  })
-
-  // --- dispose：先关 queue（MVP 无）再关 ledger ---
+  // --- dispose：先关 ledger（consolidation 在途任务由 enqueue 的 catch 兜底） ---
   ctx.effect(() => () => {
     ledger.close()
   })
