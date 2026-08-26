@@ -19,6 +19,7 @@
 //   本地 Ledger：semantic 并入 lexical → 0.50×lexical + 其余同
 // 刻意不把 authority 乘进 score（authority 决定行为资格，不决定相关性）。
 
+import { hashHex } from './constants.mjs'
 import { readGuard } from './governance.mjs'
 import { packBySection, estimateTokens, MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET, ComposeTelemetry } from './budget.mjs'
 
@@ -141,7 +142,7 @@ export function utilityOf(cand, opts = {}) {
  *
  * @param {object[]} rawCandidates - 候选（Ledger query 结果 / Provider recall 结果）
  * @param {object} opts
- * @param {string} [opts.query] - 当前用户意图/查询
+ * @param {string} [opts.query] - 当前用户消息/查询（用于 self-echo 过滤，空则不启用）
  * @param {string} [opts.scopeId] - 作用域
  * @param {string} [opts.targetDomain] - 目标域（readGuard 矩阵查表用）
  * @param {string} [opts.validAt] - 时间点（temporal 过滤）
@@ -179,13 +180,55 @@ export function compose(rawCandidates, opts = {}) {
     return { ...cand, utility, section, tokens }
   })
 
-  // —— Diversity/Dedup：MVP 按 id 去重（跨 Provider 重复）——
+  // —— Self-echo 过滤（T1）：当前用户消息（opts.query）不应被自己注回 ——
+  // 摄入发生在 agent/pre-step 之前：pre-step 时 ledger 里已有当前 turn 刚摄入的
+  // 用户消息，若不排除会把它自己注回模型 context（回声）。
+  // 判定：候选 content 完全等于 query，或 content 包含 query（query 是 content 的子串）
+  //   → dropped，reason='self-echo'。
+  // 反向（query 包含 content，即用户问句包含历史短事实）→ 保留。
+  // opts.query 为空时不启用该过滤。
+  const queryText = opts.query ? String(opts.query) : ''
+  const noEcho = []
+  if (queryText) {
+    for (const cand of ranked) {
+      const content = String(cand.content ?? '')
+      if (content === queryText || content.includes(queryText)) {
+        telemetry.dropped.push({ id: cand.id, reason: 'self-echo' })
+      } else {
+        noEcho.push(cand)
+      }
+    }
+  } else {
+    noEcho.push(...ranked)
+  }
+
+  // —— Dedup：先按 id（跨 Provider 重复），再按 contentHash（内容重复，T2）——
+  // contentHash = cand.contentHash ?? hashHex(cand.content)；同 hash 仅保留 utility
+  // 最高的一条（按 utility 降序后首次出现者保留），其余 dropped，reason='duplicate-content'。
+  // packBySection 会再按 utility/token 排序，此处重排无副作用。
   const seen = new Set()
-  const deduped = ranked.filter((c) => {
-    if (seen.has(c.id)) { telemetry.dropped.push({ id: c.id, reason: 'duplicate' }); return false }
+  const idDeduped = []
+  for (const c of noEcho) {
+    if (seen.has(c.id)) {
+      telemetry.dropped.push({ id: c.id, reason: 'duplicate' })
+      continue
+    }
     seen.add(c.id)
-    return true
-  })
+    idDeduped.push(c)
+  }
+
+  const byUtilityDesc = [...idDeduped].sort((a, b) => b.utility - a.utility)
+  const bestByHash = new Set()
+  const deduped = []
+  for (const c of byUtilityDesc) {
+    const hash = c.contentHash ?? hashHex(String(c.content ?? ''))
+    if (bestByHash.has(hash)) {
+      telemetry.dropped.push({ id: c.id, reason: 'duplicate-content' })
+    } else {
+      bestByHash.add(hash)
+      deduped.push(c)
+    }
+  }
 
   // —— Token Packing：section quota + 总预算 ——
   const packed = packBySection(deduped, opts.quota ?? MVP_SECTION_QUOTA)
