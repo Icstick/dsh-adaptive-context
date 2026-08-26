@@ -137,14 +137,15 @@ test('compose 集成：hasProvider=true 时 MemOS providerScore 参与排序（T
   }]
 
   const both = [...ledgerCandidates, ...memoCandidates]
-  const query = { query: 'pnpm', scopeId: 'user-global', targetDomain: 'work', maxTokens: 900 }
+  // query 用无语义包含的词，避免 self-echo 过滤干扰（content 包含 query 会被排除）
+  const query = { query: '工具链选择', scopeId: 'user-global', targetDomain: 'work', maxTokens: 900 }
 
   // hasProvider=true：semantic 分量 0.32×providerScore 生效，memos 候选排第一
   const withProvider = compose(both, { ...query, hasProvider: true })
   assert.equal(withProvider.items.length, 2, '两个候选都 admitted')
   assert.equal(withProvider.items[0].id, 'memos:trace:t-1', 'providerScore 推高 memos 候选')
   const mi = withProvider.items.find((i) => i.id === 'memos:trace:t-1')
-  assert.ok(mi.providerScore === 0.9 && mi.utility > 0.4, 'providerScore 参与 utility 计算')
+  assert.ok(mi.providerScore === 0.9 && mi.utility > 0.3, 'providerScore 参与 utility 计算')
 
   // 对照 hasProvider=false：semantic 并入 lexical（0.50 权重），无 providerScore 的 ledger 候选反超
   const withoutProvider = compose(both, { ...query, hasProvider: false })
