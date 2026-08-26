@@ -15,6 +15,7 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate, textOfInboxMessage } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
+import { createMemosProvider } from './providers/memos.mjs'
 import { CLAIM_DOMAINS } from './constants.mjs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
@@ -28,6 +29,9 @@ export const Config = z.object({
   recallLimit: z.number().step(1).min(1).default(20),
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
   debug: z.boolean().default(false),
+  // MemOS RecallProvider（T3 P0-3）：semantic 分来源，MVP 实验接入
+  memosBaseUrl: z.string().default('http://127.0.0.1:18801'),
+  memosEnabled: z.boolean().default(true),
 })
 
 /**
@@ -52,6 +56,37 @@ function userTextFromMessages(messages) {
     }
   }
   return parts.join(' ').trim()
+}
+
+/**
+ * 把 MemOS RecallCandidate[] 归一化为 composer 候选（T3 P0-3，COMPOSER.md §4 semantic 来源）。
+ *
+ * 映射规则：
+ *   - id：provider 已带 'memos:' 命名空间前缀时原样保留，否则补前缀（防双前缀/无前缀）
+ *   - providerScore = score：compose 在 hasProvider=true 时作为 semantic 分量（0.32 权重）
+ *   - claimDomain 固定 'experience'：MemOS 内容全是 untrusted historical data
+ *     （PROVIDERS.md §2.5：MemOS 可作 recall Provider，但不能作为真相源或治理层）
+ *   - state 'active' + scopeId：通过 readGuard 资格（scope/state 过滤）
+ *   - confidence 0.5：最低置信度（不宣称权威；五铁律：Confidence is not authority）
+ * @param {object[]} hits - provider.recall() 返回的 RecallCandidate[]
+ * @param {string} scopeId - SCOPES 之一（与 ledger 候选同 scope，保证 readGuard 放行）
+ * @returns {object[]} composer 候选
+ */
+export function normalizeMemosHits(hits, scopeId) {
+  if (!Array.isArray(hits)) return []
+  return hits
+    .filter((h) => h !== null && typeof h === 'object')
+    .map((h) => ({
+      id: typeof h.id === 'string' && h.id.startsWith('memos:') ? h.id : 'memos:' + (h.id ?? ''),
+      content: typeof h.content === 'string' ? h.content : '',
+      score: typeof h.score === 'number' ? h.score : 0,
+      providerScore: typeof h.score === 'number' ? h.score : 0,
+      sourceProvider: 'memos',
+      claimDomain: 'experience',
+      state: 'active',
+      scopeId,
+      confidence: 0.5,
+    }))
 }
 
 export function apply(ctx, config = {}) {
@@ -98,16 +133,30 @@ export function apply(ctx, config = {}) {
       if (payload?.step !== 1) return decision
       if (!decision || decision.kind !== 'enter') return decision
       const userText = userTextFromMessages(decision.messages)
-      const candidates = ledger.query({
-        scopeId: scopeOf(ctx),
+      const scopeId = scopeOf(ctx)
+      const ledgerCandidates = ledger.query({
+        scopeId,
         state: 'active',
         limit: config.recallLimit ?? 20,
       }).items
-      const result = compose(candidates, {
+
+      // —— Provider recall（T3 P0-3）：MemOS 接入，semantic 分来源（COMPOSER.md §4）——
+      // hasProvider 语义：memosEnabled 即视为 Provider 在线（provider 自适应权重切换）；
+      // recall 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
+      let memoCandidates = []
+      let hasProvider = false
+      if (config.memosEnabled) {
+        const provider = createMemosProvider({ baseUrl: config.memosBaseUrl })
+        const hits = await provider.recall({ text: userText, limit: config.recallLimit ?? 20 })
+        memoCandidates = normalizeMemosHits(hits, scopeId)
+        hasProvider = true
+      }
+
+      const result = compose([...ledgerCandidates, ...memoCandidates], {
         query: userText,
-        scopeId: scopeOf(ctx),
+        scopeId,
         targetDomain: config.targetDomain ?? 'work',
-        hasProvider: false, // MVP：无外部语义 Provider
+        hasProvider,
         maxTokens: config.hotTokens ?? 300,
       })
       if (result.items.length === 0) return decision
