@@ -9,7 +9,7 @@
 
 import { SCOPES } from './constants.mjs'
 
-/** 审计操作枚举（M3-PLAN §6.1 C1：append|supersede|promote|dismiss|rollback|export|consolidate|rebuild|system）
+/** 审计操作枚举（M3-PLAN §6.1 C1：append|supersede|promote|dismiss|rollback|export|import|consolidate|rebuild|system）
  *  + B1 store 内置 observation-upsert */
 export const AUDIT_OPS = Object.freeze([
   'append',
@@ -19,6 +19,7 @@ export const AUDIT_OPS = Object.freeze([
   'dismiss',
   'rollback',
   'export',
+  'import',
   'consolidate',
   'rebuild',
   'system',

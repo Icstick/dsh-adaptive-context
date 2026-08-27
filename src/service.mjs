@@ -4,6 +4,9 @@
 
 import { writeGuard, readGuard } from './governance.mjs'
 import { supersede, quarantine, redact, rollback, getLineage } from './lifecycle.mjs'
+import { SCOPES } from './constants.mjs'
+import { exportJsonl, importJsonl } from './export-import.mjs'
+import { rebuildView, verifyView } from './rebuild.mjs'
 
 /**
  * 生成 recall 的子串集合（OR 召回，CJK 友好）：
@@ -27,9 +30,20 @@ export function recallSubstrings(query) {
  * 构造 ctx.acp 服务。
  * @param {object} deps
  * @param {object} deps.ledger - openEvidenceLedger() 返回的 Provider
+ * @param {boolean} [deps.startupRebuild] - C3 启动校验开关：verify 失配时自动 rebuild（默认 true）
  * @returns {object} acp service
  */
-export function createAcpService({ ledger }) {
+export function createAcpService({ ledger, startupRebuild = true }) {
+  /** C2/C3 共享依赖：重建/校验/导入所需的 store 句柄（ledger 自带 candidate/audit store） */
+  const viewDeps = () => ({
+    ledger,
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+  })
+
+  /** export/import 审计的 scope 兜底：非法 scope 不阻断导出（按 user-global 记） */
+  const auditScope = (scopeId) => (scopeId && SCOPES.includes(scopeId) ? scopeId : 'user-global')
+
   return {
     /** 追加一条 Evidence（带 Write Guard），返回 {inserted, id, decision} */
     append(input) {
@@ -129,12 +143,35 @@ export function createAcpService({ ledger }) {
       return ledger.getById(id)
     },
 
-    /** export：用户可审计导出（全部状态，含标注；secret 本就不入库） */
+    /**
+     * export：用户可审计导出（全部状态，含标注；secret 本就不入库）。
+     * format='json'（缺省）保持 M2 行为：evidence 子集 JSON 数组；
+     * format='jsonl'（M3 C2）：四流全量 JSONL 快照（evidence/observation/candidate/audit，
+     * streams 参数可只导子集；scopeId 参数仅用于审计记录，快照本身不按 scope 过滤）。
+     * 导出即审计（M3-PLAN C1：export 写点），actor='agent'。
+     */
     export(scopeId, opts = {}) {
+      if (opts.format === 'jsonl') {
+        const text = exportJsonl({
+          ledger,
+          candidateStore: ledger.candidateStore,
+          auditStore: ledger.auditStore,
+          streams: opts.streams,
+          ts: opts.ts,
+        })
+        ledger.auditStore.appendAudit({
+          op: 'export',
+          scopeId: auditScope(scopeId),
+          actor: 'agent',
+          reason: 'user export',
+          payload: { format: 'jsonl', streams: opts.streams ?? null },
+        })
+        return text
+      }
       const rows = opts.includeNonActive
         ? ledger.query({ scopeId }).items
         : ledger.listActive(scopeId)
-      return rows.map((ev) => ({
+      const out = rows.map((ev) => ({
         id: ev.id,
         state: ev.state,
         sourceClass: ev.sourceClass,
@@ -147,6 +184,85 @@ export function createAcpService({ ledger }) {
         supersedes: ev.supersedes,
         metadata: ev.metadata,
       }))
+      ledger.auditStore.appendAudit({
+        op: 'export',
+        scopeId: auditScope(scopeId),
+        actor: 'agent',
+        reason: 'user export',
+        payload: { format: 'json' },
+      })
+      return out
+    },
+
+    /**
+     * import：导入 JSONL 快照（M3 C2，幂等 + 容错）。
+     * 原样恢复（不经 append/upsert，避免导入副作用污染 audit 流）；结果统计 {inserted, skipped, errors}；
+     * 顺带记一条 audit（op='import'，actor='user'，payload 含统计摘要）。
+     */
+    import(jsonlText) {
+      const res = importJsonl(String(jsonlText ?? ''), viewDeps())
+      ledger.auditStore.appendAudit({
+        op: 'import',
+        scopeId: 'user-global',
+        actor: 'user',
+        reason: 'import jsonl',
+        payload: { inserted: res.inserted, skipped: res.skipped, errors: res.errors.length },
+      })
+      return res
+    },
+
+    /** audit：审计查询（透传 auditStore.queryAudit：op/scopeId/actor/limit 过滤） */
+    audit(q = {}) {
+      return ledger.auditStore.queryAudit({
+        op: q.op,
+        scopeId: q.scopeId,
+        actor: q.actor,
+        limit: q.limit,
+      })
+    },
+
+    /**
+     * rebuild：手动重建视图（M3 C3）。重建成功记 audit（op='rebuild'，actor='user'）。
+     * 当前视图：'expression'（promoted 候选物化）。
+     */
+    rebuild(viewName = 'expression') {
+      const res = rebuildView(viewName, viewDeps())
+      if (res.ok) {
+        ledger.auditStore.appendAudit({
+          op: 'rebuild',
+          targetId: 'view:' + viewName,
+          scopeId: 'user-global',
+          actor: 'user',
+          reason: 'manual rebuild',
+          payload: { checksum: res.checksum },
+        })
+      }
+      return res
+    },
+
+    /**
+     * startupVerify：启动时校验 expression view 与 candidate 重放一致。
+     * 失配且 startupRebuild=true（缺省）→ 自动重建 + audit（op='rebuild'，actor='system'）；
+     * startupRebuild=false → 只报告不重建。返回 {ok, checksum, rebuilt, reason?}。
+     */
+    startupVerify() {
+      const v = verifyView('expression', viewDeps())
+      if (v.ok) return { ok: true, checksum: v.checksum, rebuilt: false }
+      if (!startupRebuild) {
+        return { ok: false, checksum: v.checksum ?? null, rebuilt: false, reason: v.reason ?? 'verify failed' }
+      }
+      const r = rebuildView('expression', viewDeps())
+      if (r.ok) {
+        ledger.auditStore.appendAudit({
+          op: 'rebuild',
+          targetId: 'view:expression',
+          scopeId: 'user-global',
+          actor: 'system',
+          reason: 'startup verify mismatch auto rebuild',
+          payload: { checksum: r.checksum },
+        })
+      }
+      return { ok: r.ok, checksum: r.checksum, rebuilt: true }
     },
 
     /**
