@@ -120,6 +120,10 @@ pnpm install
 | `consolidationModel` | string | — | 提炼用的模型 |
 | `consolidationMaxTokens` | number | 1024 | 提炼输出上限 |
 | `consolidationTimeoutMs` | number | 30000 | 提炼调用超时 |
+| `autoPromote` | boolean | false | 风格候选策略达标后自动晋升（默认关，走人工审批门） |
+| `viewsDir` | string | ledgerDir/views | 物化视图目录 |
+| `policyConfig` | object | — | promotion 策略参数覆盖（floors 只允许更严：min_events 最低 2、min_strong 最低 1、证据窗口最长 30 天） |
+| `startupRebuild` | boolean | true | 启动时校验视图 checksum，失配自动重建 |
 
 ## API（ctx.acp）
 

@@ -303,7 +303,7 @@ export function apply(ctx, config = {}) {
       })
       if (!ev) return
       const res = acp.append(ev)
-      // MVP：审计落 acp audit 表（TODO v0.1: 若 harness 收录 acp/* 词汇再 append session event）
+      // 审计：已落 acp audit 表（M3 C1）；harness 若收录 acp/* 词汇可再 append session event
       if (config.debug) {
         ctx.logger?.debug?.('[acp] ingest ' + res.decision + ' id=' + res.id)
       }

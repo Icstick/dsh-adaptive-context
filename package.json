@@ -43,8 +43,7 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
-    "lint": "oxlint",
-    "typecheck": "tsc -p tsconfig.check.json"
+    "lint": "oxlint"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
