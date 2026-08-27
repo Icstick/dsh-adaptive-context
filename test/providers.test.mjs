@@ -2,8 +2,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createMemosProvider } from '../src/providers/memos.mjs'
+import { createProviderRegistry } from '../src/providers/registry.mjs'
 import { isValidRecallCandidate } from '../src/providers/recall-contract.mjs'
-import { normalizeMemosHits } from '../src/index.mjs'
+import { normalizeMemosHits, normalizeRecallHits } from '../src/index.mjs'
 import { compose } from '../src/composer.mjs'
 
 test('recall 成功：归一化为 RecallCandidate', async (t) => {
@@ -151,3 +152,166 @@ test('compose 集成：hasProvider=true 时 MemOS providerScore 参与排序（T
   const withoutProvider = compose(both, { ...query, hasProvider: false })
   assert.equal(withoutProvider.items[0].id, 'ev_ledger_1', '无 Provider 时 lexical 主导')
 })
+
+// ===================== M3 A1：Provider Registry（多源召回） =====================
+
+test('registry 缺省：无 recallProviders → 自动构造默认 memos 项（向后兼容）', async (t) => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      hits: [{ tier: 1, refId: 't-1', refKind: 'trace', score: 0.7, snippet: '默认 memos 项召回' }],
+    }),
+  })
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const registry = createProviderRegistry({
+    defaults: { memosBaseUrl: 'http://127.0.0.1:18801', memosEnabled: true },
+  })
+  const providers = registry.listRecallProviders()
+  assert.equal(providers.length, 1)
+  assert.equal(providers[0].id, 'memos')
+  assert.equal(providers[0].kind, 'recall')
+  assert.equal(providers[0].enabled, true)
+  assert.equal(providers[0].weight, 1) // 缺省权重 1.0
+  assert.ok(providers[0].timeoutMs > 0)
+
+  const hits = await registry.recallAll({ text: '默认', limit: 5 })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].sourceProvider, 'memos')
+  assert.equal(hits[0].content, '默认 memos 项召回')
+})
+
+test('registry 缺省但 memosEnabled=false → 无启用 provider，recallAll 返回 []', async () => {
+  const registry = createProviderRegistry({
+    defaults: { memosBaseUrl: 'http://127.0.0.1:18801', memosEnabled: false },
+  })
+  assert.equal(registry.listRecallProviders().length, 0)
+  assert.deepEqual(await registry.recallAll({ text: 'x' }), [])
+})
+
+test('registry 显式 [] → 不启用任何 provider（区别于缺省）', async () => {
+  const registry = createProviderRegistry({ recallProviders: [], defaults: { memosEnabled: true } })
+  assert.equal(registry.listRecallProviders().length, 0)
+  assert.deepEqual(await registry.recallAll({ text: 'x' }), [])
+})
+
+test('registry 双 provider：并行召回合并，sourceProvider 按描述符 id 打标', async () => {
+  const seen = []
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', enabled: true, timeoutMs: 100, weight: 2, create: () => ({
+        recall: async (query, signal) => {
+          seen.push('alpha')
+          assert.ok(signal instanceof AbortSignal)
+          assert.equal(query.text, 'pnpm')
+          assert.equal(query.limit, 5)
+          return [{ id: 'a-1', content: 'alpha 记忆', score: 0.9, sourceProvider: 'alpha' }]
+        },
+      }) },
+      { id: 'beta', enabled: true, timeoutMs: 100, weight: 0.5, create: () => ({
+        recall: async () => {
+          seen.push('beta')
+          return [{ id: 'b-1', content: 'beta 记忆', score: 0.5, sourceProvider: 'beta' }]
+        },
+      }) },
+    ],
+  })
+
+  const providers = registry.listRecallProviders()
+  assert.equal(providers.length, 2)
+  assert.equal(providers[0].weight, 2)
+  assert.equal(providers[1].weight, 0.5)
+
+  const hits = await registry.recallAll({ text: 'pnpm', limit: 5 })
+  assert.deepEqual(seen.sort(), ['alpha', 'beta']) // 并行（都触发）
+  assert.equal(hits.length, 2)
+  assert.deepEqual(hits.map((h) => h.sourceProvider).sort(), ['alpha', 'beta'])
+  // 即使 provider 自带 sourceProvider，也以描述符 id 为准
+  assert.equal(hits.find((h) => h.id === 'a-1').sourceProvider, 'alpha')
+})
+
+test('registry 禁用任一 → 另一正常召回', async () => {
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', enabled: false, create: () => ({ recall: async () => [{ id: 'a', content: 'x', score: 1, sourceProvider: 'alpha' }] }) },
+      { id: 'beta', enabled: true, create: () => ({ recall: async () => [{ id: 'b', content: 'y', score: 1, sourceProvider: 'beta' }] }) },
+    ],
+  })
+  assert.equal(registry.listRecallProviders().length, 1)
+  assert.equal(registry.listRecallProviders()[0].id, 'beta')
+  const hits = await registry.recallAll({ text: 'x' })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].sourceProvider, 'beta')
+})
+
+test('registry 全部禁用 → recallAll 返回 []', async () => {
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', enabled: false, create: () => ({ recall: async () => [{ id: 'a', content: 'x', score: 1, sourceProvider: 'alpha' }] }) },
+      { id: 'beta', enabled: false, create: () => ({ recall: async () => [{ id: 'b', content: 'y', score: 1, sourceProvider: 'beta' }] }) },
+    ],
+  })
+  assert.equal(registry.listRecallProviders().length, 0)
+  assert.deepEqual(await registry.recallAll({ text: 'x' }), [])
+})
+
+test('registry fail-open：单 provider 抛错不阻断另一 provider', async () => {
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', timeoutMs: 100, create: () => ({ recall: async () => { throw new Error('boom') } }) },
+      { id: 'beta', timeoutMs: 100, create: () => ({ recall: async () => [{ id: 'b', content: 'beta 正常', score: 0.6, sourceProvider: 'beta' }] }) },
+    ],
+  })
+  const hits = await registry.recallAll({ text: 'x' })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].sourceProvider, 'beta')
+})
+
+test('registry fail-open：单 provider 超时（挂起）不阻断另一 provider', async () => {
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', timeoutMs: 30, create: () => ({ recall: () => new Promise(() => {}) }) }, // 永不 resolve
+      { id: 'beta', timeoutMs: 100, create: () => ({ recall: async () => [{ id: 'b', content: 'beta 及时', score: 0.6, sourceProvider: 'beta' }] }) },
+    ],
+  })
+  const started = Date.now()
+  const hits = await registry.recallAll({ text: 'x' })
+  assert.ok(Date.now() - started < 200, '不被挂起的 provider 拖住')
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].sourceProvider, 'beta')
+})
+
+test('registry 集成：recallAll → normalizeRecallHits → compose 多源融合（A3 装配）', async () => {
+  const registry = createProviderRegistry({
+    recallProviders: [
+      { id: 'alpha', weight: 1, create: () => ({ recall: async () => [{ id: 'a-1', content: 'alpha 记忆片段甲', score: 0.9, sourceProvider: 'alpha' }] }) },
+      { id: 'beta', weight: 3, create: () => ({ recall: async () => [{ id: 'b-1', content: 'beta 记忆片段乙', score: 0.3, sourceProvider: 'beta' }] }) },
+    ],
+  })
+  const hits = await registry.recallAll({ text: '工具链', limit: 5 })
+  const recallCandidates = normalizeRecallHits(hits, 'user-global')
+  assert.equal(recallCandidates.length, 2)
+  assert.equal(recallCandidates[0].claimDomain, 'experience')
+  assert.equal(recallCandidates[0].state, 'active')
+  assert.equal(recallCandidates[0].scopeId, 'user-global')
+
+  const providerWeights = Object.fromEntries(registry.listRecallProviders().map((p) => [p.id, p.weight]))
+  assert.deepEqual(providerWeights, { alpha: 1, beta: 3 })
+
+  const result = compose(recallCandidates, {
+    query: '工具链选择',
+    scopeId: 'user-global',
+    targetDomain: 'work',
+    hasProvider: true,
+    providerWeights,
+    maxTokens: 900,
+  })
+  assert.equal(result.items.length, 2)
+  // 归一化后 id 带 sourceProvider 前缀（normalizeRecallHits 防跨源 id 冲突）
+  assert.equal(recallCandidates[0].id, 'alpha:a-1')
+  assert.equal(recallCandidates[1].id, 'beta:b-1')
+  // beta 归一化后 1.0 × 3 → semantic 分量压过 alpha（0.9→1.0 × 1）
+  assert.equal(result.items[0].id, 'beta:b-1')
+})
+

@@ -171,3 +171,71 @@ test('compose 未传 validAt：不施加 temporal 过滤（now 视图默认）',
   ], { query: '现在的规则是什么？', scopeId: 'user-global' })
   assert.equal(r.items.length, 1)
 })
+
+// ===================== M3 A3：多源融合（providerWeights / 归一化 / 跨源 dedup） =====================
+
+/** Provider 候选（experience 域，readGuard 放行） */
+const pcand = (over = {}) => ({
+  id: 'p_1',
+  scopeId: 'user-global',
+  state: 'active',
+  sourceClass: 'external_tool',
+  authority: 'external_information',
+  claimDomain: 'experience',
+  confidence: 0.5,
+  content: 'alpha 记忆片段甲',
+  providerScore: 0.5,
+  sourceProvider: 'alpha',
+  ...over,
+})
+
+const A3_QUERY = { query: '工具链选择', scopeId: 'user-global', targetDomain: 'work', maxTokens: 900 }
+
+test('A3 多源同 contentHash：跨源候选合并为 1 条，保留 utility 最高', () => {
+  const alpha = pcand({ id: 'alpha:1', content: '相同记忆片段', providerScore: 0.9 })
+  const beta = pcand({ id: 'beta:1', content: '相同记忆片段', sourceProvider: 'beta', providerScore: 0.5, confidence: 0.9 })
+  const r = compose([alpha, beta], { ...A3_QUERY, hasProvider: true, providerWeights: { alpha: 1, beta: 1 } })
+  assert.equal(r.items.length, 1, '同 hash 跨源合并')
+  assert.equal(r.items[0].id, 'beta:1', '保留 utility 最高（beta 归一化后语义持平，confidence 更高）')
+  assert.equal(r.dropped.filter((d) => d.reason === 'duplicate-content').length, 1)
+  assert.equal(r.dropped.find((d) => d.reason === 'duplicate-content').id, 'alpha:1')
+})
+
+test('A3 providerWeights：权重放大 provider semantic 分量（低分高权重反超）', () => {
+  const alpha = pcand({ id: 'alpha:1', providerScore: 0.9 })
+  const beta = pcand({ id: 'beta:1', sourceProvider: 'beta', content: 'beta 记忆片段乙', providerScore: 0.3 })
+  const r = compose([alpha, beta], { ...A3_QUERY, hasProvider: true, providerWeights: { alpha: 1, beta: 4 } })
+  assert.equal(r.items.length, 2)
+  assert.equal(r.items[0].id, 'beta:1', 'beta 归一化 1.0 × 4 压过 alpha 归一化 1.0 × 1')
+})
+
+test('A3 归一化：同权重下跨 provider 分数尺度可比（0.9 与 0.5 归一化后相等）', () => {
+  const alpha = pcand({ id: 'alpha:1', providerScore: 0.9, confidence: 0.5 })
+  const beta = pcand({ id: 'beta:1', sourceProvider: 'beta', providerScore: 0.5, confidence: 0.7 })
+
+  // 归一化路径（providerWeights 提供）：两者 semantic 均为 1.0 → beta 靠 confidence 胜出
+  const norm = compose([alpha, beta], { ...A3_QUERY, hasProvider: true, providerWeights: { alpha: 1, beta: 1 } })
+  assert.equal(norm.items[0].id, 'beta:1')
+
+  // M2 路径（无 providerWeights）：raw providerScore 直接参与 → alpha(0.9) 胜出
+  const legacy = compose([alpha, beta], { ...A3_QUERY, hasProvider: true })
+  assert.equal(legacy.items[0].id, 'alpha:1')
+})
+
+test('A3 hasProvider=false：providerWeights 不生效（M2 回归，semantic 仍并入 lexical）', () => {
+  const alpha = pcand({ id: 'alpha:1', providerScore: 0.9 })
+  const beta = pcand({ id: 'beta:1', sourceProvider: 'beta', providerScore: 0.3 })
+  const withWeights = compose([alpha, beta], { ...A3_QUERY, hasProvider: false, providerWeights: { alpha: 1, beta: 4 } })
+  const withoutWeights = compose([alpha, beta], { ...A3_QUERY, hasProvider: false })
+  assert.deepEqual(withWeights.items.map((i) => i.id), withoutWeights.items.map((i) => i.id))
+  assert.deepEqual(withWeights.items.map((i) => i.utility), withoutWeights.items.map((i) => i.utility))
+})
+
+test('A3 单 provider 与 M2 排序一致（回归）：归一化只改尺度不改次序', () => {
+  const a = pcand({ id: 'a', content: 'a 记忆片段', providerScore: 0.9 })
+  const b = pcand({ id: 'b', content: 'b 记忆片段', providerScore: 0.6 })
+  const withWeights = compose([a, b], { ...A3_QUERY, hasProvider: true, providerWeights: { alpha: 1 } })
+  const legacy = compose([a, b], { ...A3_QUERY, hasProvider: true })
+  assert.deepEqual(withWeights.items.map((i) => i.id), legacy.items.map((i) => i.id))
+})
+

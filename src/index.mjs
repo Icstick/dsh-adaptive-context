@@ -16,12 +16,13 @@ import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 import { compose, renderSourceLabelled } from './composer.mjs'
-import { createMemosProvider } from './providers/memos.mjs'
+import { createProviderRegistry } from './providers/registry.mjs'
+import { createLlmRouter } from './providers/llm-router.mjs'
 import { createConsolidator } from './consolidate.mjs'
 import {
   CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
 } from './constants.mjs'
-import { createUserMessage, BlockAssembler } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
@@ -36,6 +37,15 @@ export const Config = z.object({
   // MemOS RecallProvider（T3 P0-3）：semantic 分来源，MVP 实验接入
   memosBaseUrl: z.string().default('http://127.0.0.1:18801'),
   memosEnabled: z.boolean().default(true),
+  // RecallProviders 注册表（M3 A1）：多记忆源并行召回；缺省（undefined）自动用
+  // memosBaseUrl/memosEnabled 构造默认 memos 项（向后兼容，M2 行为不变）；
+  // 显式 [] 表示不启用任何 recall provider。
+  // 注：用 z.any() 走透传——schemastery 3.18 无 true-optional 数组（absent 会默认 []，
+  // 破坏"缺省→默认 memos 项"语义）；形状校验由 registry 的 normalizeDescriptor 防御性兜底。
+  recallProviders: z.any(),
+  // LLM 任务路由（M3 A2）：{task: {provider, model, fallback?, timeoutMs, maxTokens}}；
+  // consolidation 任务缺省从 consolidationProvider/consolidationModel 映射（向后兼容）。
+  llmTasks: z.any(),
   // Background consolidation（可选：缺省用 constants 默认；llm 路由缺省则走规则兜底）
   consolidationMinEvidence: z.number().step(1).min(1),
   consolidationMinTurns: z.number().step(1).min(1),
@@ -70,76 +80,51 @@ function userTextFromMessages(messages) {
 }
 
 /**
- * 把 MemOS RecallCandidate[] 归一化为 composer 候选（T3 P0-3，COMPOSER.md §4 semantic 来源）。
+ * 把 RecallCandidate[] 归一化为 composer 候选（M3 A3 多源，COMPOSER.md §4 semantic 来源）。
  *
  * 映射规则：
- *   - id：provider 已带 'memos:' 命名空间前缀时原样保留，否则补前缀（防双前缀/无前缀）
+ *   - id：已带 '<sourceProvider>:' 命名空间前缀时原样保留，否则补前缀（防双前缀/无前缀）
  *   - providerScore = score：compose 在 hasProvider=true 时作为 semantic 分量（0.32 权重）
- *   - claimDomain 固定 'experience'：MemOS 内容全是 untrusted historical data
- *     （PROVIDERS.md §2.5：MemOS 可作 recall Provider，但不能作为真相源或治理层）
+ *   - claimDomain 固定 'experience'：Provider 召回内容全是 untrusted historical data
+ *     （PROVIDERS.md §2.5：Provider 可作 recall 来源，但不能作为真相源或治理层）
  *   - state 'active' + scopeId：通过 readGuard 资格（scope/state 过滤）
  *   - confidence 0.5：最低置信度（不宣称权威；五铁律：Confidence is not authority）
- * @param {object[]} hits - provider.recall() 返回的 RecallCandidate[]
+ * @param {object[]} hits - provider.recall() 返回的 RecallCandidate[]（含 sourceProvider）
  * @param {string} scopeId - SCOPES 之一（与 ledger 候选同 scope，保证 readGuard 放行）
  * @returns {object[]} composer 候选
  */
-export function normalizeMemosHits(hits, scopeId) {
+export function normalizeRecallHits(hits, scopeId) {
   if (!Array.isArray(hits)) return []
   return hits
     .filter((h) => h !== null && typeof h === 'object')
-    .map((h) => ({
-      id: typeof h.id === 'string' && h.id.startsWith('memos:') ? h.id : 'memos:' + (h.id ?? ''),
-      content: typeof h.content === 'string' ? h.content : '',
-      score: typeof h.score === 'number' ? h.score : 0,
-      providerScore: typeof h.score === 'number' ? h.score : 0,
-      sourceProvider: 'memos',
-      claimDomain: 'experience',
-      state: 'active',
-      scopeId,
-      confidence: 0.5,
-    }))
+    .map((h) => {
+      const pid = typeof h.sourceProvider === 'string' ? h.sourceProvider : ''
+      const prefix = pid ? pid + ':' : ''
+      return {
+        id: typeof h.id === 'string' && h.id.startsWith(prefix) ? h.id : prefix + (h.id ?? ''),
+        content: typeof h.content === 'string' ? h.content : '',
+        score: typeof h.score === 'number' ? h.score : 0,
+        providerScore: typeof h.score === 'number' ? h.score : 0,
+        sourceProvider: pid,
+        claimDomain: 'experience',
+        state: 'active',
+        scopeId,
+        confidence: 0.5,
+      }
+    })
 }
 
 /**
- * 用 DSH llm 服务做一次纯文本生成（consolidation 专用）。
- * 参考 @deepseek-ai/dsh-session-title-llm 的 BlockAssembler 流式收集范式。
- * 失败（finish 非 stop / 无文本）向上抛——由 consolidate.mjs 的 deriveViaLlm 重试/丢弃。
+ * MemOS 专用归一化（T3 兼容导出）：所有命中强制标 sourceProvider='memos'。
+ * @param {object[]} hits
+ * @param {string} scopeId
+ * @returns {object[]} composer 候选
  */
-async function callLlmText(llm, { provider, model, maxTokens, timeoutMs }, userText, system) {
-  const messages = [createUserMessage({
-    content: [{ type: 'text', text: userText }],
-    source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'consolidation' },
-  })]
-  const controller = new AbortController()
-  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
-  try {
-    const assembler = new BlockAssembler()
-    for await (const chunk of llm.stream({
-      provider,
-      model,
-      messages,
-      system,
-      maxTokens,
-      temperature: 0,
-      signal: controller.signal,
-      purpose: 'compaction', // GenerateOptions 联合类型只有 compaction|session-title
-    })) {
-      assembler.push(chunk)
-    }
-    const finish = assembler.finish
-    if (finish && finish.reason?.kind && finish.reason.kind !== 'stop') {
-      throw new Error('acp consolidation llm finished with ' + finish.reason.kind)
-    }
-    const text = assembler.blocks()
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    if (!text) throw new Error('acp consolidation llm produced no text')
-    return text
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+export function normalizeMemosHits(hits, scopeId) {
+  const labeled = Array.isArray(hits)
+    ? hits.map((h) => (h !== null && typeof h === 'object' ? { ...h, sourceProvider: 'memos' } : h))
+    : hits
+  return normalizeRecallHits(labeled, scopeId)
 }
 
 export function apply(ctx, config = {}) {
@@ -162,18 +147,44 @@ export function apply(ctx, config = {}) {
 
   const minEvidence = config.consolidationMinEvidence ?? CONSOLIDATION_MIN_EVIDENCE
   const minTurns = config.consolidationMinTurns ?? CONSOLIDATION_MIN_TURNS
-  const consolidationMaxTokens = config.consolidationMaxTokens ?? 1024
-  const consolidationTimeoutMs = config.consolidationTimeoutMs ?? 30000
 
-  /** llm 缺失或未配置 provider/model → null（consolidator 走规则兜底） */
+  // M3 A1：Recall Provider 注册表（多记忆源；缺省用 memosBaseUrl/memosEnabled 构造默认
+  // memos 项，向后兼容，M2 行为不变）
+  const registry = createProviderRegistry({
+    recallProviders: config.recallProviders,
+    defaults: {
+      memosBaseUrl: config.memosBaseUrl,
+      memosEnabled: config.memosEnabled,
+    },
+  })
+
+  // M3 A2：LLM 任务路由表——llmTasks 显式配置优先；consolidation 任务缺省从
+  // consolidationProvider/consolidationModel 映射（向后兼容）。
+  function resolveLlmTasks() {
+    const raw = config.llmTasks
+    const tasks = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {}
+    if (!tasks.consolidation) {
+      const provider = config.consolidationProvider
+      const model = config.consolidationModel
+      if (provider && model) {
+        tasks.consolidation = {
+          provider,
+          model,
+          timeoutMs: config.consolidationTimeoutMs ?? 30000,
+          maxTokens: config.consolidationMaxTokens ?? 1024,
+        }
+      }
+    }
+    return tasks
+  }
+
+  const llmRouter = createLlmRouter({ tasks: resolveLlmTasks(), resolveLlm })
+
+  /** llm 缺失或 consolidation 无路由 → null（consolidator 走规则兜底） */
   function buildLlmCall() {
-    const llm = resolveLlm()
-    const provider = config.consolidationProvider
-    const model = config.consolidationModel
-    if (!llm || !provider || !model) return null
-    return (userText, system) => callLlmText(llm, {
-      provider, model, maxTokens: consolidationMaxTokens, timeoutMs: consolidationTimeoutMs,
-    }, userText, system)
+    if (!resolveLlm()) return null
+    if (!llmRouter.getRoute('consolidation')) return null
+    return (userText, system) => llmRouter.callFor('consolidation', userText, system)
   }
 
   // T6：已发起过审批请求的 evidence id（防同一候选重复弹窗）
@@ -242,23 +253,26 @@ export function apply(ctx, config = {}) {
         limit: config.recallLimit ?? 20,
       }).items
 
-      // —— Provider recall（T3 P0-3）：MemOS 接入，semantic 分来源（COMPOSER.md §4）——
-      // hasProvider 语义：memosEnabled 即视为 Provider 在线（provider 自适应权重切换）；
-      // recall 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
-      let memoCandidates = []
-      let hasProvider = false
-      if (config.memosEnabled) {
-        const provider = createMemosProvider({ baseUrl: config.memosBaseUrl })
-        const hits = await provider.recall({ text: userText, limit: config.recallLimit ?? 20 })
-        memoCandidates = normalizeMemosHits(hits, scopeId)
-        hasProvider = true
+      // —— Provider recall（M3 A1）：registry 并行召回，semantic 分来源（COMPOSER.md §4）——
+      // hasProvider = registry 有启用 provider（provider 自适应权重切换）；
+      // recallAll 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
+      const enabledProviders = registry.listRecallProviders()
+      const hasProvider = enabledProviders.length > 0
+      let recallCandidates = []
+      if (hasProvider) {
+        const hits = await registry.recallAll({ text: userText, limit: config.recallLimit ?? 20 })
+        recallCandidates = normalizeRecallHits(hits, scopeId)
       }
+      // M3 A3：多源融合权重（缺省 1.0）
+      const providerWeights = {}
+      for (const p of enabledProviders) providerWeights[p.id] = p.weight ?? 1
 
-      const result = compose([...ledgerCandidates, ...memoCandidates], {
+      const result = compose([...ledgerCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
         targetDomain: config.targetDomain ?? 'work',
         hasProvider,
+        providerWeights,
         maxTokens: config.hotTokens ?? 300,
       })
 

@@ -110,14 +110,31 @@ export function freshnessScore(cand, now = Date.now()) {
 
 /**
  * 单条候选的 utility 计算（COMPOSER.md §4）。
- * @param {object} cand - { content, confidence?, evidenceIds?, validFrom?, validUntil?, observedAt?, workMatch?, providerScore?, explicitRef?, explicitCorrection? }
- * @param {object} opts - { query, validAt?, hasProvider?, now? }
+ * @param {object} cand - { content, confidence?, evidenceIds?, validFrom?, validUntil?, observedAt?, workMatch?, providerScore?, sourceProvider?, explicitRef?, explicitCorrection? }
+ * @param {object} opts - { query, validAt?, hasProvider?, now?, providerWeights?, providerMax? }
+ *   providerWeights：{[providerId]: number}，缺省 1.0（M3 A3 多源融合）
+ *   providerMax：Map<providerId, maxScore>，compose 预计算的每 provider 最大分
  * @returns {{relevance: number, quality: number, utility: number}}
  */
 export function utilityOf(cand, opts = {}) {
   const lex = lexicalScore(opts.query, cand.content)
-  const semantic = opts.hasProvider ? (cand.providerScore ?? 0) : 0
-  const lexEffective = opts.hasProvider ? lex : lex
+  // semantic 分量（M3 A3）：
+  //   - 无 providerWeights（M2 路径）：hasProvider 时直接用 providerScore（回归不变）
+  //   - 有 providerWeights（A3 路径）：providerScore 先除以该 provider 最大分（归一化，
+  //     跨 provider 分数尺度可比），再乘该 provider 权重（缺省 1.0）
+  let semantic = 0
+  if (opts.hasProvider) {
+    const raw = typeof cand.providerScore === 'number' ? cand.providerScore : 0
+    if (opts.providerMax) {
+      const pid = typeof cand.sourceProvider === 'string' ? cand.sourceProvider : ''
+      const max = opts.providerMax.get(pid)
+      const norm = max > 0 ? raw / max : 0
+      semantic = norm * (opts.providerWeights?.[pid] ?? 1)
+    } else {
+      semantic = raw
+    }
+  }
+  const lexEffective = lex
   const lexicalW = opts.hasProvider ? WEIGHTS.lexical : LEXICAL_WITHOUT_SEMANTIC
   const semanticTerm = opts.hasProvider ? WEIGHTS.semantic * semantic : 0
 
@@ -147,6 +164,8 @@ export function utilityOf(cand, opts = {}) {
  * @param {string} [opts.targetDomain] - 目标域（readGuard 矩阵查表用）
  * @param {string} [opts.validAt] - 时间点（temporal 过滤）
  * @param {boolean} [opts.hasProvider] - 是否有语义 Provider（MemOS 在线）
+ * @param {object} [opts.providerWeights] - M3 A3：{[providerId]: number} 多源权重，缺省 1.0；
+ *   提供时启用 providerScore 归一化（每 provider 除以自身最大分）
  * @param {object} [opts.quota] - section quota（默认 MVP）
  * @param {number} [opts.maxTokens] - 总预算上限（默认 MVP_TOTAL_BUDGET）
  * @returns {{items: object[], dropped: object[], telemetry: object}}
@@ -167,6 +186,22 @@ export function compose(rawCandidates, opts = {}) {
     else telemetry.dropped.push({ id: cand.id, reason: g.reasons.join(';') })
   }
 
+  // —— M3 A3：providerWeights 存在时预计算每 provider 最大 providerScore ——
+  // 归一化基准取"进入排名的合格候选"（readGuard 放行后），跨 provider 尺度可比。
+  const providerWeights = opts.providerWeights && typeof opts.providerWeights === 'object'
+    ? opts.providerWeights
+    : null
+  let providerMax = null
+  if (providerWeights) {
+    providerMax = new Map()
+    for (const cand of eligible) {
+      const pid = typeof cand.sourceProvider === 'string' ? cand.sourceProvider : ''
+      if (!pid) continue
+      const s = typeof cand.providerScore === 'number' ? cand.providerScore : 0
+      if (!providerMax.has(pid) || s > providerMax.get(pid)) providerMax.set(pid, s)
+    }
+  }
+
   // —— Rank：utility 计算 + 候选元数据补齐 ——
   const ranked = eligible.map((cand) => {
     const { utility } = utilityOf(cand, {
@@ -174,6 +209,8 @@ export function compose(rawCandidates, opts = {}) {
       validAt: opts.validAt,
       hasProvider: opts.hasProvider,
       now: opts.now,
+      providerWeights: providerWeights ?? undefined,
+      providerMax,
     })
     const section = sectionOf(cand)
     const tokens = estimateTokens(cand.content)
