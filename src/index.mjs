@@ -398,8 +398,18 @@ export function apply(ctx, config = {}) {
     }
   })
 
-  // --- dispose：先关 ledger（consolidation 在途任务由 enqueue 的 catch 兜底） ---
+  // --- dispose：bounded best-effort drain（M4 R1，对齐 MemOS 5s 窗口） ---
+  // consolidation 在途任务最多等 5s 排空（awaitIdle），超时直接关库（SQLite WAL 保证一致性）。
   ctx.effect(() => () => {
-    ledger.close()
+    const DRAIN_MS = 5000
+    const closeLedger = () => {
+      try { ledger.close() } catch { /* already closed */ }
+    }
+    if (!consolidate.isPending()) { closeLedger(); return }
+    const timer = setTimeout(closeLedger, DRAIN_MS)
+    timer.unref?.()
+    consolidate.awaitIdle()
+      .then(() => { clearTimeout(timer); closeLedger() })
+      .catch(() => { clearTimeout(timer); closeLedger() })
   })
 }

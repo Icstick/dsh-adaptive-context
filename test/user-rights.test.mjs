@@ -265,7 +265,7 @@ test('service.startupVerify：构建后通过；篡改后自动重建（默认 t
 
   // startupRebuild=false：只校验不重建
   const dir2 = mkdtempSync(path.join(tmpdir(), 'acp-ur-'))
-  const ledger2 = openEvidenceLedger({ dir2 })
+  const ledger2 = openEvidenceLedger({ dir: dir2 })
   const service2 = createAcpService({ ledger: ledger2, startupRebuild: false })
   t.after(() => { ledger2.close(); rmSync(dir2, { recursive: true, force: true }) })
   ledger2.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: ['e1'] })

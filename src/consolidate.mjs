@@ -120,13 +120,11 @@ async function deriveViaLlm(evidences, llmCall, logger) {
       text = await llmCall(userText, system)
     } catch (err) {
       logger?.warn?.('[acp] consolidation llm call failed (attempt ' + (attempt + 1) + '/2): ' + (err && err.message))
-      console.log('[CONS-PROBE] llm call failed: ' + (err && err.message) + ' | stack: ' + (err && err.stack ? String(err.stack).slice(0, 300) : ''))
       continue
     }
     const parsed = parseObservations(text)
     if (parsed.ok) return parsed.observations
     logger?.warn?.('[acp] consolidation llm output parse failed (attempt ' + (attempt + 1) + '/2)')
-    console.log('[CONS-PROBE] parse failed, raw: ' + String(text).slice(0, 200))
   }
   return [] // 丢弃该批（不落规则兜底——规则兜底只在 llmCall 缺失时启用）
 }
