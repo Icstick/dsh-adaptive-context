@@ -19,6 +19,7 @@ import {
   PROMOTION_TOOL_NAME,
   REVIEW_STATUSES,
 } from '../src/expression.mjs'
+import { createViews } from '../src/views.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-expr-'))
@@ -252,4 +253,176 @@ test('index.mjs：acp 桥含 requestPromotion 且 inject 不加 approval', () =>
   const injectLine = src.match(/export const inject = (\[[^\]]*\])/)?.[1] ?? ''
   assert.ok(!injectLine.includes('approval'))
   assert.ok(injectLine.includes('llm'))
+})
+
+// ── M3 B3：manual 审批 → candidate promote + view + audit ─────────────────
+
+/** 带 B3 依赖的 expression（candidateStore/auditStore/views） */
+function b3Expression(t) {
+  const { ledger } = fresh(t)
+  const vdir = mkdtempSync(path.join(tmpdir(), 'acp-expr-view-'))
+  t.after(() => rmSync(vdir, { recursive: true, force: true }))
+  const views = createViews({ dir: vdir, ledger, candidateStore: ledger.candidateStore, scopeId: 'user-global' })
+  const expression = createExpression({
+    ledger,
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+    views,
+    scopeId: 'user-global',
+  })
+  return { ledger, views, expression }
+}
+
+test('B3 manual：allowed-once → candidate promote + view 重写 + audit(actor=user) + reviewStatus', async (t) => {
+  const { ledger, views, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  // 模拟 consolidation：已建候选 + 标 pending
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  ledger.updateMetadata(ev.id, { reviewStatus: PENDING_PROMOTION })
+
+  const approval = { request: async () => 'allowed-once' }
+  const row = await expression.requestPromotion(
+    { id: ev.id, content: ev.content, claimDomain: ev.claimDomain, sourceRef: ev.sourceRef },
+    mockCtx(approval),
+    mockAgent(),
+  )
+  // reviewStatus 同步（保留现有行为）
+  assert.equal(row.metadata.reviewStatus, 'promoted')
+  // candidate 行 promote（reason=manual-approval）
+  const updated = ledger.candidateStore.getCandidate(cand.id)
+  assert.equal(updated.state, 'promoted')
+  assert.equal(updated.decisionReason, 'manual-approval')
+  // view 重写：含该候选的行
+  const viewRows = views.readExpression()
+  assert.equal(viewRows.length, 1)
+  assert.equal(viewRows[0].candidateId, cand.id)
+  assert.equal(viewRows[0].content, ev.content)
+  // audit：op=promote, actor=user
+  const audit = ledger.auditStore.queryAudit({ op: 'promote' })
+  assert.ok(audit.items.some((a) => a.targetId === cand.id && a.actor === 'user' && a.reason === 'manual-approval'))
+  // 视图与重放一致
+  assert.equal(views.verifyExpression().ok, true)
+})
+
+test('B3 manual：rejected → candidate reject + audit(actor=user) + reviewStatus=dismissed', async (t) => {
+  const { ledger, views, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  ledger.updateMetadata(ev.id, { reviewStatus: PENDING_PROMOTION })
+
+  const approval = { request: async () => 'rejected' }
+  const row = await expression.requestPromotion(
+    { id: ev.id, content: ev.content, claimDomain: ev.claimDomain },
+    mockCtx(approval),
+    mockAgent(),
+  )
+  assert.equal(row.metadata.reviewStatus, 'dismissed')
+  assert.equal(ledger.candidateStore.getCandidate(cand.id).state, 'rejected')
+  const audit = ledger.auditStore.queryAudit({ op: 'dismiss' })
+  assert.ok(audit.items.some((a) => a.targetId === cand.id && a.actor === 'user'))
+  // rejected 不进 view
+  assert.equal(views.readExpression(), null)
+})
+
+test('B3 promoteEvidence：无既有候选时兜底创建候选（纯 manual 流程可审计）', (t) => {
+  const { ledger, views, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const row = expression.promoteEvidence(ev.id)
+  assert.equal(row.metadata.reviewStatus, 'promoted')
+  const cand = expression.findCandidateForEvidence(ev.id)
+  assert.ok(cand)
+  assert.equal(cand.state, 'promoted')
+  assert.equal(cand.decisionReason, 'manual-approval')
+  assert.equal(views.readExpression().length, 1)
+  const audit = ledger.auditStore.queryAudit({ op: 'promote' })
+  assert.ok(audit.items.some((a) => a.actor === 'user'))
+})
+
+test('B3 legacy：无 B3 依赖时（createExpression({ledger})）不产生候选行', async (t) => {
+  const { ledger } = fresh(t)
+  const ev = seedStyleEvidence(ledger)
+  const expression = createExpression({ ledger })
+  const approval = { request: async () => 'allowed-once' }
+  const row = await expression.requestPromotion(
+    { id: ev.id, content: ev.content },
+    mockCtx(approval),
+    mockAgent(),
+  )
+  assert.equal(row.metadata.reviewStatus, 'promoted')
+  assert.equal(ledger.candidateStore.listCandidates({}).length, 0)
+})
+
+// ── M3 B3：autoPromote 路径 ───────────────────────────────────────────────
+
+test('B3 autoPromote：policy promote → candidate promote + view + audit(actor=consolidation) + reviewStatus', (t) => {
+  const { ledger, views, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  const policyResult = {
+    decision: 'promote',
+    reason: 'policy floors satisfied (2/2 compatible events, 1/1 strong supporting)',
+    policy: { autoPromote: true, minEvents: 2, evaluatedAt: new Date().toISOString() },
+  }
+  const promoted = expression.autoPromote(cand, policyResult)
+  assert.equal(promoted.state, 'promoted')
+  assert.equal(promoted.decisionReason, policyResult.reason)
+  // reviewStatus 同步
+  assert.equal(ledger.getById(ev.id).metadata.reviewStatus, 'promoted')
+  // view 重写
+  const viewRows = views.readExpression()
+  assert.equal(viewRows.length, 1)
+  assert.equal(viewRows[0].candidateId, cand.id)
+  // audit：op=promote, actor=consolidation（B1 AUDIT_ACTORS 不含 policy → 用 consolidation），payload 含 policy 快照
+  const audit = ledger.auditStore.queryAudit({ op: 'promote', actor: 'consolidation' })
+  assert.equal(audit.items.length, 1)
+  assert.equal(audit.items[0].targetId, cand.id)
+  assert.equal(audit.items[0].reason, policyResult.reason)
+  assert.deepEqual(audit.items[0].payload.policy, policyResult.policy)
+  assert.equal(views.verifyExpression().ok, true)
+})
+
+test('B3 autoPromote：非 proposed 候选 → 抛错（不落状态）', (t) => {
+  const { ledger, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  const promoted = expression.autoPromote(cand, { decision: 'promote', reason: 'x' })
+  assert.equal(promoted.state, 'promoted')
+  assert.throws(
+    () => expression.autoPromote(promoted, { decision: 'promote', reason: 'x2' }),
+    /not proposed/,
+  )
+})
+
+// ── M3 B3：rollback 路径 ──────────────────────────────────────────────────
+
+test('B3 rollback：promoted → rolled_back + view 重建 + audit(actor=user)', (t) => {
+  const { ledger, views, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  ledger.candidateStore.transitionCandidate(cand.id, 'promote', { reason: 'test', actor: 'user' })
+  views.rebuildExpression()
+  assert.equal(views.readExpression().length, 1)
+
+  const res = expression.rollback(cand.id)
+  assert.equal(res.ok, true)
+  assert.equal(res.candidate.state, 'rolled_back')
+  // view 重写：rolled_back 候选即时失效
+  assert.equal(views.readExpression().length, 0)
+  assert.equal(views.verifyExpression().ok, true)
+  // audit
+  const audit = ledger.auditStore.queryAudit({ op: 'rollback' })
+  assert.ok(audit.items.some((a) => a.targetId === cand.id && a.actor === 'user'))
+})
+
+test('B3 rollback：只对 promoted 有效（非 promoted → ok:false + reason）', (t) => {
+  const { ledger, expression } = b3Expression(t)
+  const ev = seedStyleEvidence(ledger)
+  const cand = ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ev.id] })
+  const res = expression.rollback(cand.id) // proposed
+  assert.equal(res.ok, false)
+  assert.ok(res.reason.includes('only applies to promoted'))
+
+  const missing = expression.rollback('cand_nope')
+  assert.equal(missing.ok, false)
+  assert.ok(missing.reason.includes('not found'))
 })

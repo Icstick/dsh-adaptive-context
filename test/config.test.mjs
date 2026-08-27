@@ -14,6 +14,7 @@ test('plugin config validates defaults through Standard Schema', async () => {
       memosBaseUrl: 'http://127.0.0.1:18801',
       memosEnabled: true,
       startupRebuild: true,
+      autoPromote: false,
     },
   })
 })

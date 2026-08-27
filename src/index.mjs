@@ -11,6 +11,7 @@
 //   session/event  → (session, event) 两参数签名；event.type 为 agent/inbox/spliced、turn/* 等
 //   turn/end       → session/event 内 event.type==='turn/end' 时入队 background consolidation
 
+import path from 'node:path'
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
@@ -19,6 +20,8 @@ import { compose, renderSourceLabelled } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
 import { createLlmRouter } from './providers/llm-router.mjs'
 import { createConsolidator } from './consolidate.mjs'
+import { createViews } from './views.mjs'
+import { evaluateCandidate } from './policy.mjs'
 import {
   CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
 } from './constants.mjs'
@@ -56,6 +59,11 @@ export const Config = z.object({
   consolidationModel: z.string(),
   consolidationMaxTokens: z.number().step(1).min(1),
   consolidationTimeoutMs: z.number().step(1).min(1),
+  // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
+  autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
+  viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
+  policyConfig: z.any(),                   // 可选：policy 覆盖（minEvents/maxEvidenceAgeDays…；
+                                           // floors 收口由 policy.mjs 保证，只允许更严）
 })
 
 /**
@@ -130,10 +138,55 @@ export function normalizeMemosHits(hits, scopeId) {
   return normalizeRecallHits(labeled, scopeId)
 }
 
+/**
+ * M3 B3：materialized view 行 → composer 候选（防御性归一化，fail-open）。
+ * view 行本身已带 evidence 快照字段（views.mjs buildExpressionRows），此处只兜底缺省值，
+ * 保证任意手写/旧版 view 文件也能安全进入 compose（readGuard 需要 scopeId/state/authority）。
+ * @param {object} r - view 行
+ * @param {string} fallbackScopeId - 行缺 scopeId 时的回退
+ * @returns {object} composer 候选
+ */
+export function viewRowToCandidate(r, fallbackScopeId) {
+  return {
+    id: r.id,
+    content: r.content,
+    sourceClass: r.sourceClass ?? 'evidence',
+    claimDomain: r.claimDomain ?? 'style',
+    authority: r.authority ?? 'user_explicit',
+    confidence: typeof r.confidence === 'number' ? r.confidence : 0.5,
+    durability: typeof r.durability === 'number' ? r.durability : 0.5,
+    sensitivity: r.sensitivity ?? 'private',
+    state: 'active',
+    scopeId: r.scopeId ?? fallbackScopeId,
+    observedAt: r.observedAt,
+    sourceRef: r.sourceRef ?? {},
+    contentHash: r.contentHash,
+    evidenceIds: r.evidenceIds,
+    validFrom: r.validFrom,
+    validUntil: r.validUntil,
+  }
+}
+
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
   const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
-  const expression = createExpression({ ledger })
+
+  // --- M3 B3：materialized view（views are rebuildable）---
+  // 视图目录缺省 ledgerDir/views；verify/rebuild 与 expression 重写同源（同 scope 投影）。
+  const views = createViews({
+    dir: config.viewsDir ?? path.join(config.ledgerDir, 'views'),
+    ledger,
+    candidateStore: ledger.candidateStore,
+    scopeId: scopeOf(ctx),
+  })
+
+  const expression = createExpression({
+    ledger,
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+    views,
+    scopeId: scopeOf(ctx),
+  })
 
   // --- Service Definition：注册 ctx.acp ---
   // T6 桥：acp.requestPromotion(candidate, ctx) 兼容两参调用（C 组接缝）。
@@ -202,6 +255,14 @@ export function apply(ctx, config = {}) {
   // T6：已发起过审批请求的 evidence id（防同一候选重复弹窗）
   const promotionRequested = new Set()
 
+  // M3 B3：policy 装配——policyConfig 覆盖（floors 收口由 policy.mjs 保证，只允许更严）；
+  // autoPromote 主开关在插件 Config 层（Config.autoPromote），policyConfig 不能覆盖它。
+  const policyConfig = {
+    ...(config.policyConfig && typeof config.policyConfig === 'object' ? config.policyConfig : {}),
+    autoPromote: config.autoPromote === true,
+  }
+  const policyEvaluate = (args) => evaluateCandidate({ ...args, config: policyConfig })
+
   const consolidate = createConsolidator({
     ledger,
     scopeId: scopeOf(ctx),
@@ -209,6 +270,11 @@ export function apply(ctx, config = {}) {
     minEvidence,
     minTurns,
     logger: ctx.logger,
+    // M3 B3：guarded auto promotion——consolidation 产出 style 候选 → policy → autoPromote
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+    policyEvaluate,
+    autoPromote: (candidate, policyResult) => expression.autoPromote(candidate, policyResult),
   })
 
   // llm 服务重挂载时重建调用闭包（withService 模式，踩坑清单第 5 条）
@@ -265,6 +331,17 @@ export function apply(ctx, config = {}) {
         limit: config.recallLimit ?? 20,
       }).items
 
+      // —— M3 B3：materialized view 注入（expression section hot path）——
+      // readExpression() 有内容 → 注入 style 候选（promoted 候选 → view 行，快照自足）；
+      // 无内容 → 维持现状（ledger 注入）。与 ledger 同 id 候选由 composer dedup 去重，
+      // 已 promoted 证据即使被 supersede（ledger 不再 active）仍由 view 兜底注入。
+      const viewRows = views.readExpression()
+      const viewCandidates = Array.isArray(viewRows) && viewRows.length > 0
+        ? viewRows
+            .filter((r) => r && typeof r.content === 'string' && r.content.length > 0)
+            .map((r) => viewRowToCandidate(r, scopeId))
+        : []
+
       // —— Provider recall（M3 A1）：registry 并行召回，semantic 分来源（COMPOSER.md §4）——
       // hasProvider = registry 有启用 provider（provider 自适应权重切换）；
       // recallAll 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
@@ -279,7 +356,7 @@ export function apply(ctx, config = {}) {
       const providerWeights = {}
       for (const p of enabledProviders) providerWeights[p.id] = p.weight ?? 1
 
-      const result = compose([...ledgerCandidates, ...recallCandidates], {
+      const result = compose([...ledgerCandidates, ...viewCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
         targetDomain: config.targetDomain ?? 'work',

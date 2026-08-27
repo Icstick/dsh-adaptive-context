@@ -11,6 +11,9 @@ import { openEvidenceLedger } from '../src/store.mjs'
 import {
   createConsolidator, parseObservations, ruleObservationFor, buildConsolidationPrompt,
 } from '../src/consolidate.mjs'
+import { createExpression, PENDING_PROMOTION } from '../src/expression.mjs'
+import { evaluateCandidate } from '../src/policy.mjs'
+import { supersede } from '../src/lifecycle.mjs'
 
 function freshLedger(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-cons-'))
@@ -312,4 +315,168 @@ test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移�
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ===================== M3 B3：style 候选 → policy（guarded auto promotion） =====================
+// 依赖 B2 evaluateCandidate + B1 candidate/audit store；无依赖时维持 M2 行为（仅 pending）。
+
+/** style 域证据（同会话，observedAt=now → policy 新鲜度/同会话达标） */
+function styleEv(ledger, i, overrides = {}) {
+  const res = ledger.append({
+    sourceClass: 'user_input',
+    authority: 'user_explicit',
+    confidence: 0.9,
+    durability: 0.5,
+    sensitivity: 'private',
+    claimDomain: 'style',
+    content: '风格偏好 ' + i,
+    observedAt: new Date().toISOString(),
+    sourceRef: { sessionId: 'sess-b3', messageId: 'm' + i },
+    ...overrides,
+  })
+  return ledger.getById(res.id)
+}
+
+/** 带 B3 依赖的 consolidator（policyEvaluate 包装 + autoPromote 桥到 expression） */
+function b3Consolidator(ledger, policyConfig = {}, extra = {}) {
+  const expression = createExpression({
+    ledger,
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+    views: null,
+    scopeId: 'user-global',
+  })
+  return createConsolidator({
+    ledger,
+    minEvidence: 1,
+    minTurns: 100,
+    llmCall: null,
+    candidateStore: ledger.candidateStore,
+    auditStore: ledger.auditStore,
+    policyEvaluate: (args) => evaluateCandidate({ ...args, config: policyConfig }),
+    autoPromote: (cand, res) => expression.autoPromote(cand, res),
+    ...extra,
+  })
+}
+
+test('B3 style：policy 达标（2 STRONG 同会话 + autoPromote）→ 自动 promote（候选行+reviewStatus+audit）', async (t) => {
+  const ledger = freshLedger(t)
+  const a = styleEv(ledger, 1)
+  const b = styleEv(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: '先结论后展开', evidenceIds: [a.id, b.id] },
+    ],
+  })
+  const c = b3Consolidator(ledger, { autoPromote: true }, { llmCall })
+  const r = await c.runOnce()
+  assert.equal(r.observations, 1)
+
+  const cands = ledger.candidateStore.listCandidates({ scopeId: 'user-global' })
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].state, 'promoted')
+  assert.equal(cands[0].domain, 'style')
+  // reviewStatus 同步（不再 pending）
+  assert.equal(ledger.getById(a.id).metadata.reviewStatus, 'promoted')
+  assert.equal(ledger.getById(b.id).metadata.reviewStatus, 'promoted')
+  // audit：op=promote, actor=consolidation，payload 含 policy 快照
+  const audit = ledger.auditStore.queryAudit({ op: 'promote', actor: 'consolidation' })
+  assert.equal(audit.items.length, 1)
+  assert.ok(audit.items[0].payload.policy)
+  assert.equal(audit.items[0].payload.policy.autoPromote, true)
+})
+
+test('B3 style：autoPromote 未开启（默认）→ policy hold → 维持 pending_promotion（manual 路径）', async (t) => {
+  const ledger = freshLedger(t)
+  const a = styleEv(ledger, 1)
+  const b = styleEv(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: '先结论后展开', evidenceIds: [a.id, b.id] },
+    ],
+  })
+  const c = b3Consolidator(ledger, {}, { llmCall })
+  await c.runOnce()
+
+  const cands = ledger.candidateStore.listCandidates({ scopeId: 'user-global' })
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].state, 'proposed')
+  assert.equal(ledger.getById(a.id).metadata.reviewStatus, PENDING_PROMOTION)
+  assert.equal(ledger.getById(b.id).metadata.reviewStatus, PENDING_PROMOTION)
+  assert.equal(ledger.auditStore.queryAudit({ op: 'promote' }).total, 0)
+})
+
+test('B3 style：存在冲突候选（同 scope+domain proposed）→ 达标也 hold → pending', async (t) => {
+  const ledger = freshLedger(t)
+  const other = ledger.append({
+    sourceClass: 'user_input', authority: 'user_explicit', confidence: 0.9, durability: 0.5,
+    sensitivity: 'private', claimDomain: 'style', content: '旧候选主张', sourceRef: { sessionId: 'sess-other' },
+  })
+  ledger.candidateStore.createCandidate({ scopeId: 'user-global', domain: 'style', evidenceIds: [ledger.getById(other.id).id] })
+
+  const a = styleEv(ledger, 1)
+  const b = styleEv(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: '新主张', evidenceIds: [a.id, b.id] },
+    ],
+  })
+  const c = b3Consolidator(ledger, { autoPromote: true }, { llmCall })
+  await c.runOnce()
+
+  const cands = ledger.candidateStore.listCandidates({ scopeId: 'user-global' })
+  assert.equal(cands.length, 2)
+  const mine = cands.find((x) => x.evidenceIds.includes(a.id))
+  assert.equal(mine.state, 'proposed') // 冲突候选 → hold → 留人工
+  assert.equal(ledger.getById(a.id).metadata.reviewStatus, PENDING_PROMOTION)
+})
+
+test('B3 style：同键 superseded 旧证据 → 标 opposes → policy hold → pending', async (t) => {
+  const ledger = freshLedger(t)
+  const a = styleEv(ledger, 1, { content: '喜欢 verbose 风格', sourceRef: { sessionId: 'sess-b3', messageId: 'old' } })
+  const b = styleEv(ledger, 2, { content: '改为简洁风格' })
+  supersede(a.id, b.id, { ledger }) // b.supersedes=[a]，a.state=superseded
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: '简洁风格', evidenceIds: [b.id] },
+    ],
+  })
+  const c = b3Consolidator(ledger, { autoPromote: true }, { llmCall })
+  await c.runOnce()
+
+  const cand = ledger.candidateStore.listCandidates({ scopeId: 'user-global' })[0]
+  assert.equal(cand.state, 'proposed') // 反对证据 → hold → 留人工
+  assert.equal(ledger.getById(b.id).metadata.reviewStatus, PENDING_PROMOTION)
+})
+
+test('B3 style：同证据集批量重复产出 → 复用候选不新建（候选去重）', async (t) => {
+  const ledger = freshLedger(t)
+  const a = styleEv(ledger, 1)
+  const b = styleEv(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: 'x1', evidenceIds: [a.id, b.id] },
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: 'x2', evidenceIds: [a.id, b.id] },
+    ],
+  })
+  const c = b3Consolidator(ledger, { autoPromote: true }, { llmCall })
+  await c.runOnce()
+
+  const cands = ledger.candidateStore.listCandidates({ scopeId: 'user-global' })
+  assert.equal(cands.length, 1) // 复用，不新建
+  assert.equal(cands[0].state, 'promoted')
+})
+
+test('B3 style：无 B3 依赖 → 维持 M2 行为（仅 pending，不建候选）', async (t) => {
+  const ledger = freshLedger(t)
+  const a = styleEv(ledger, 1)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '回答风格', predicate: '偏好', claimDomain: 'style', text: 'x', evidenceIds: [a.id] },
+    ],
+  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  await c.runOnce()
+  assert.equal(ledger.getById(a.id).metadata.reviewStatus, PENDING_PROMOTION)
+  assert.equal(ledger.candidateStore.listCandidates({}).length, 0)
 })
