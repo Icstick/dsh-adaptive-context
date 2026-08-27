@@ -101,6 +101,7 @@ export function buildConsolidationPrompt(evidences) {
     'Return ONLY one JSON object with exactly this shape:',
     '{"observations":[{"subject":"...","predicate":"...","claimDomain":"...","text":"...","evidenceIds":["..."]}]}',
     `claimDomain must be one of: ${CLAIM_DOMAINS.join(', ')}.`,
+    'Domain guidance: style = tone/format/presentation preferences (e.g. 简洁/详细/亲切的语气, 先结论后展开, 中文回复); user_preference = substantive preferences (e.g. 用 pnpm, 用 Bun). 表达风格偏好一律标 style，不要标 user_preference。',
     'subject is a short noun phrase; predicate is a short relation verb; text is a concise fact (<= 500 chars); evidenceIds reference the supporting evidence ids.',
     'Do not invent facts absent from the evidence. Do not output anything except the JSON.',
   ].join('\n')
@@ -118,11 +119,13 @@ async function deriveViaLlm(evidences, llmCall, logger) {
       text = await llmCall(userText, system)
     } catch (err) {
       logger?.warn?.('[acp] consolidation llm call failed (attempt ' + (attempt + 1) + '/2): ' + (err && err.message))
+      console.log('[CONS-PROBE] llm call failed: ' + (err && err.message) + ' | stack: ' + (err && err.stack ? String(err.stack).slice(0, 300) : ''))
       continue
     }
     const parsed = parseObservations(text)
     if (parsed.ok) return parsed.observations
     logger?.warn?.('[acp] consolidation llm output parse failed (attempt ' + (attempt + 1) + '/2)')
+    console.log('[CONS-PROBE] parse failed, raw: ' + String(text).slice(0, 200))
   }
   return [] // 丢弃该批（不落规则兜底——规则兜底只在 llmCall 缺失时启用）
 }
