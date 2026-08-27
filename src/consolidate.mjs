@@ -17,6 +17,7 @@ import {
   MAX_OBSERVATION_SUBJECT_CHARS,
   MAX_OBSERVATION_TEXT_CHARS,
 } from './constants.mjs'
+import { PENDING_PROMOTION } from './expression.mjs'
 
 // ===================== 规则兜底（LLM 不可用） =====================
 
@@ -130,6 +131,97 @@ async function deriveViaLlm(evidences, llmCall, logger) {
   return [] // 丢弃该批（不落规则兜底——规则兜底只在 llmCall 缺失时启用）
 }
 
+// ===================== M3 B3：style 候选 → policy（guarded auto promotion） =====================
+// 流程（M3-PLAN §6.4）：
+//   consolidation 产出 style 候选 → evaluateCandidate（evidenceRows=候选证据+相关证据）
+//     → decision=promote 且 config.autoPromote=true → autoPromote 路径（候选行 promote +
+//       reviewStatus 同步 + audit + view 重写，由 index 注入的 autoPromote 执行）
+//     → 否则维持现状（pending_promotion → manual approval 路径）
+// 方向性（B2 报告集成点 1）：候选证据默认 supports；同键 superseded 旧证据标 opposes
+// （反向纠正 → policy 走 hold → 留人工）。
+
+/** 标 pending 标记（幂等 + 不降级已 promoted 证据）；失败静默（fail-open） */
+function markPending(ledger, evId, logger) {
+  try {
+    const row = ledger.getById(evId)
+    if (row && row.state === 'active'
+      && row.metadata?.reviewStatus !== PENDING_PROMOTION
+      && row.metadata?.reviewStatus !== 'promoted') {
+      ledger.updateMetadata(evId, { reviewStatus: PENDING_PROMOTION })
+    }
+  } catch (err) {
+    logger?.warn?.('[acp] style pending mark error: ' + (err && err.message))
+  }
+}
+
+/** 同证据集（无序）匹配已有 style 候选（reuse-or-create 的去重依据） */
+function findCandidateForEvidenceIds(candidateStore, scopeId, evidenceIds) {
+  const want = new Set(evidenceIds)
+  for (const c of candidateStore.listCandidates({ scopeId, limit: 200 })) {
+    if (c.domain !== 'style') continue
+    const ids = c.evidenceIds ?? []
+    if (ids.length === want.size && ids.every((id) => want.has(id))) return c
+  }
+  return null
+}
+
+/**
+ * 处理一条 style 观察派生：
+ *  - 无 B3 依赖（candidateStore/policyEvaluate 缺失）→ 维持 M2 行为：仅标 pending_promotion；
+ *  - 有依赖 → reuse-or-create 候选 → 装配证据行（含方向）→ evaluateCandidate：
+ *      promote → autoPromote；否则 → pending_promotion（manual 路径）。
+ * @returns {'pending'|'auto-promoted'|'promoted'|string} 处理结果（测试/日志用）
+ */
+function handleStyleCandidate({ obs, ledger, candidateStore, auditStore, policyEvaluate, autoPromote, scopeId, logger }) {
+  const evidenceIds = Array.isArray(obs.evidenceIds) ? obs.evidenceIds : []
+  if (!candidateStore || typeof policyEvaluate !== 'function') {
+    for (const evId of evidenceIds) markPending(ledger, evId, logger)
+    return 'pending'
+  }
+  // reuse-or-create：同证据集已有候选则复用；终态候选尊重既有决策（不再新建/复活）
+  let candidate = findCandidateForEvidenceIds(candidateStore, scopeId, evidenceIds)
+  if (candidate && candidate.state !== 'proposed') {
+    return candidate.state === 'promoted' ? 'promoted' : 'decided-' + candidate.state
+  }
+  if (!candidate) {
+    candidate = candidateStore.createCandidate({ scopeId, domain: 'style', evidenceIds })
+  }
+  // 证据行装配（B2 集成点 1）：候选证据默认 supports；同键 superseded 旧证据标 opposes
+  const evidenceRows = []
+  for (const evId of evidenceIds) {
+    const ev = ledger.getById(evId)
+    if (!ev) continue
+    evidenceRows.push({ ...ev, direction: 'supports' })
+    for (const prevId of ev.supersedes ?? []) {
+      const prev = ledger.getById(prevId)
+      if (prev) evidenceRows.push({ ...prev, direction: 'opposes' })
+    }
+  }
+  // 冲突候选（B2 集成点 2）：同 scope+domain、非自身、proposed/promoted
+  const conflictingCandidates = candidateStore.listCandidates({ scopeId, limit: 200 })
+    .filter((c) => c.domain === 'style' && c.id !== candidate.id
+      && (c.state === 'proposed' || c.state === 'promoted'))
+    .map((c) => c.id)
+  // policy 评估（纯函数零副作用；评估失败不阻断 → 落人工）
+  let policyResult = null
+  try {
+    policyResult = policyEvaluate({ candidate: { ...candidate, conflictingCandidates }, evidenceRows })
+  } catch (err) {
+    logger?.warn?.('[acp] style policy evaluate error: ' + (err && err.message))
+  }
+  if (policyResult && policyResult.decision === 'promote' && typeof autoPromote === 'function') {
+    try {
+      autoPromote(candidate, policyResult)
+      return 'auto-promoted'
+    } catch (err) {
+      logger?.warn?.('[acp] style auto promote error: ' + (err && err.message))
+      // 自动路径失败 → 落人工（pending），不丢候选
+    }
+  }
+  for (const evId of evidenceIds) markPending(ledger, evId, logger)
+  return policyResult ? policyResult.decision : 'pending'
+}
+
 // ===================== Consolidator（队列 + 节流 + 派生） =====================
 
 /**
@@ -151,6 +243,11 @@ export function createConsolidator(opts = {}) {
     minEvidence = CONSOLIDATION_MIN_EVIDENCE,
     minTurns = CONSOLIDATION_MIN_TURNS,
     logger = console,
+    // M3 B3：guarded auto promotion 依赖（index.mjs 装配；缺省 null = M2 行为）
+    candidateStore = null,
+    auditStore = null,
+    policyEvaluate = null, // (args) => evaluateCandidate({...args, config})，index 注入
+    autoPromote = null,    // (candidate, policyResult) => expression.autoPromote(...)，index 注入
   } = opts
 
   let pending = false
@@ -229,19 +326,11 @@ export function createConsolidator(opts = {}) {
       for (const obs of observations) {
         const res = ledger.upsertObservation({ scopeId, ...obs })
         if (res.inserted || res.row) wrote += 1
-        // style 候选（2026-08-27 架构修正）：后台任务无 agent，不能直接发面板审批；
-        // 把源证据标 pending_promotion，下个 turn 的 pre-step（有 agent）统一发起审批。
+        // style 候选（M3 B3）：policy 达标且 auto_promote=true → 自动提升；
+        // 否则维持 M2 架构修正（后台任务无 agent → 标 pending_promotion，
+        // 下个 turn 的 pre-step 有 agent 时统一发起面板审批）。
         if (obs.claimDomain === 'style') {
-          for (const evId of obs.evidenceIds ?? []) {
-            try {
-              const row = ledger.getById(evId)
-              if (row && row.state === 'active' && row.metadata?.reviewStatus !== 'pending_promotion') {
-                ledger.updateMetadata(evId, { reviewStatus: 'pending_promotion' })
-              }
-            } catch (err) {
-              logger?.warn?.('[acp] style pending mark error: ' + (err && err.message))
-            }
-          }
+          handleStyleCandidate({ obs, ledger, candidateStore, auditStore, policyEvaluate, autoPromote, scopeId, logger })
         }
       }
 
