@@ -168,13 +168,15 @@ export function viewRowToCandidate(r, fallbackScopeId) {
 }
 
 export function apply(ctx, config = {}) {
-  const ledger = openEvidenceLedger({ dir: config.ledgerDir })
+  // ledgerDir 兜底解析（与 openEvidenceLedger 同款：DSH_HOME 环境变量不可靠，配置优先）
+  const ledgerDir = config.ledgerDir ?? path.join(process.env.DSH_HOME || '', 'acp')
+  const ledger = openEvidenceLedger({ dir: ledgerDir })
   const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
 
   // --- M3 B3：materialized view（views are rebuildable）---
   // 视图目录缺省 ledgerDir/views；verify/rebuild 与 expression 重写同源（同 scope 投影）。
   const views = createViews({
-    dir: config.viewsDir ?? path.join(config.ledgerDir, 'views'),
+    dir: config.viewsDir ?? path.join(ledgerDir, 'views'),
     ledger,
     candidateStore: ledger.candidateStore,
     scopeId: scopeOf(ctx),
