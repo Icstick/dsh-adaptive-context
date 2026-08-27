@@ -4,6 +4,10 @@
 // 幂等：id 由 sourceRef + contentHash 派生（evidenceIdOf），重放同一事件自然得到
 // 相同 id → INSERT OR IGNORE 即幂等；重复摄入返回 inserted:false。
 // Provider 不做治理裁决（那是 governance.mjs 职责），也不做派生（那是 consolidation 职责）。
+//
+// schema v3（M3 B1，2026-08-28）：新增 candidate / candidate_events / audit 三表；
+// store 层写操作（append / supersede / observation-upsert）内置 audit 行（actor='system'），
+// 数据写 + audit 写同事务提交（写后即审）。
 
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
@@ -15,6 +19,8 @@ import {
   evidenceIdOf, hashHex,
 } from './constants.mjs'
 import { assertAuthorityConsistent } from './governance.mjs'
+import { createAuditStore } from './audit.mjs'
+import { createCandidateStore } from './candidate.mjs'
 
 const PRAGMAS = 'PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;'
 
@@ -91,6 +97,47 @@ CREATE TABLE IF NOT EXISTS observation (
 CREATE INDEX IF NOT EXISTS idx_observation_scope ON observation (scope_id);
 CREATE INDEX IF NOT EXISTS idx_observation_claim_domain ON observation (claim_domain);
 CREATE INDEX IF NOT EXISTS idx_observation_key ON observation (scope_id, subject, predicate, claim_domain);
+
+CREATE TABLE IF NOT EXISTS candidate (
+  id              TEXT PRIMARY KEY,
+  scope_id        TEXT NOT NULL,
+  domain          TEXT NOT NULL,
+  evidence_ids    TEXT NOT NULL DEFAULT '[]',  -- JSON array
+  state           TEXT NOT NULL DEFAULT 'proposed',
+  policy          TEXT,                          -- JSON（B2 评估快照，创建时为 NULL）
+  decision_reason TEXT,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_scope_state ON candidate (scope_id, state);
+
+CREATE TABLE IF NOT EXISTS candidate_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- 重放顺序 = 插入顺序
+  candidate_id TEXT NOT NULL,
+  ts           INTEGER NOT NULL,
+  event        TEXT NOT NULL,
+  reason       TEXT NOT NULL DEFAULT '',
+  actor        TEXT NOT NULL,
+  payload      TEXT                                -- JSON（create 事件携带静态属性）
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_events_candidate ON candidate_events (candidate_id, id);
+
+CREATE TABLE IF NOT EXISTS audit (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        INTEGER NOT NULL,
+  op        TEXT NOT NULL,
+  target_id TEXT,
+  scope_id  TEXT NOT NULL,
+  actor     TEXT NOT NULL,
+  reason    TEXT NOT NULL DEFAULT '',
+  payload   TEXT                                -- JSON
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_op ON audit (op);
+CREATE INDEX IF NOT EXISTS idx_audit_scope ON audit (scope_id);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit (actor);
 `
 
 function assertChoice(value, allowed, label) {
@@ -118,10 +165,14 @@ export function openEvidenceLedger(opts = {}) {
     throw new Error(`ACP ledger schema mismatch: db=${existing.value} expected=${SCHEMA_VERSION}`)
   }
   if (existingVersion !== SCHEMA_VERSION) {
-    // 迁移：v1 → v2 只新增 observation 表（SCHEMA 已 CREATE TABLE IF NOT EXISTS），
-    // 不破坏 evidence 表；新库亦走此路径写入当前版本号。
+    // 迁移：v1 → v2 新增 observation 表；v2 → v3 新增 candidate / candidate_events / audit 表。
+    // SCHEMA 全部 CREATE TABLE IF NOT EXISTS，不破坏既有表；新库亦走此路径写入当前版本号。
     db.prepare('INSERT OR REPLACE INTO acp_meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION))
   }
+
+  // M3 B1：candidate / audit 操作层装配（表 DDL 已在 SCHEMA，工厂只操作同一 db 句柄）
+  const auditStore = createAuditStore({ db })
+  const candidateStore = createCandidateStore({ db })
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO evidence (
@@ -171,34 +222,54 @@ export function openEvidenceLedger(opts = {}) {
     const now = Date.now()
     const state = input.state ?? 'active'
 
-    insertStmt.run(
-      id,
-      input.scopeId ?? 'user-global',
-      input.agentKey ?? '',
-      input.sessionType ?? 'root',
-      input.sourceClass,
-      input.authority,
-      input.confidence,
-      input.durability,
-      input.sensitivity,
-      input.claimDomain,
-      input.content,
-      contentHash,
-      JSON.stringify(sourceRef),
-      input.observedAt ?? new Date().toISOString(),
-      input.validFrom ?? null,
-      input.validUntil ?? null,
-      state,
-      JSON.stringify(input.supersedes ?? []),
-      JSON.stringify(input.metadata ?? {}),
-      now,
-      now,
-    )
+    const scopeId = input.scopeId ?? 'user-global'
 
-    const changes = db.prepare('SELECT changes() AS c').get().c
-    const inserted = changes > 0
-    const row = inserted ? getById(id) : null
-    return { inserted, id, row }
+    // 数据写 + audit 写同事务（M3 B1：写后即审，原子提交）
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      insertStmt.run(
+        id,
+        scopeId,
+        input.agentKey ?? '',
+        input.sessionType ?? 'root',
+        input.sourceClass,
+        input.authority,
+        input.confidence,
+        input.durability,
+        input.sensitivity,
+        input.claimDomain,
+        input.content,
+        contentHash,
+        JSON.stringify(sourceRef),
+        input.observedAt ?? new Date().toISOString(),
+        input.validFrom ?? null,
+        input.validUntil ?? null,
+        state,
+        JSON.stringify(input.supersedes ?? []),
+        JSON.stringify(input.metadata ?? {}),
+        now,
+        now,
+      )
+
+      const changes = db.prepare('SELECT changes() AS c').get().c
+      const inserted = changes > 0
+      if (inserted) {
+        auditStore.appendAudit({
+          op: 'append',
+          targetId: id,
+          scopeId,
+          actor: 'system',
+          reason: 'evidence appended',
+          payload: { contentHash },
+        })
+      }
+      db.exec('COMMIT')
+      const row = inserted ? getById(id) : null
+      return { inserted, id, row }
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
   }
 
   function getById(id) {
@@ -206,12 +277,31 @@ export function openEvidenceLedger(opts = {}) {
     return r ? toEvidence(r) : null
   }
 
-  /** 状态迁移（supersede / quarantine / redact / 恢复 active） */
+  /** 状态迁移（supersede / quarantine / redact / 恢复 active）。
+   * supersede 时内置 audit（actor='system'）；其余状态迁移不产生内置 audit（上层另行显式审计）。 */
   function setState(id, state, opts = {}) {
     assertChoice(state, EVIDENCE_STATES, 'state')
-    updateStateStmt.run(state, Date.now(), id)
-    if (opts.supersedes) {
-      updateSupersedesStmt.run(JSON.stringify(opts.supersedes), state, Date.now(), id)
+    const existing = getById(id) // 需要 scope_id 供 audit；不存在时 UPDATE 本为空操作
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      updateStateStmt.run(state, Date.now(), id)
+      if (opts.supersedes) {
+        updateSupersedesStmt.run(JSON.stringify(opts.supersedes), state, Date.now(), id)
+      }
+      if (state === 'superseded' && existing) {
+        auditStore.appendAudit({
+          op: 'supersede',
+          targetId: id,
+          scopeId: existing.scopeId,
+          actor: 'system',
+          reason: 'evidence superseded',
+          payload: { supersedes: opts.supersedes ?? [] },
+        })
+      }
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
     }
     return getById(id)
   }
@@ -344,26 +434,41 @@ export function openEvidenceLedger(opts = {}) {
     const byId = db.prepare('SELECT * FROM observation WHERE id = ?').get(id)
     if (byId) return { inserted: false, id, row: toObservation(byId), supersededId: null }
 
-    // 冲突：同键且 active 的旧行
-    const conflict = db.prepare(`
-      SELECT id FROM observation
-      WHERE scope_id = ? AND subject = ? AND predicate = ? AND claim_domain = ? AND state = 'active'
-    `).get(scopeId, subject, predicate, claimDomain)
+    // 冲突：同键且 active 的旧行（事务内：冲突翻转 + 插入 + audit 原子提交）
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const conflict = db.prepare(`
+        SELECT id FROM observation
+        WHERE scope_id = ? AND subject = ? AND predicate = ? AND claim_domain = ? AND state = 'active'
+      `).get(scopeId, subject, predicate, claimDomain)
 
-    let supersedes = []
-    let supersededId = null
-    if (conflict) {
-      db.prepare(`UPDATE observation SET state = 'superseded' WHERE id = ?`).run(conflict.id)
-      supersedes = [conflict.id]
-      supersededId = conflict.id
+      let supersedes = []
+      let supersededId = null
+      if (conflict) {
+        db.prepare(`UPDATE observation SET state = 'superseded' WHERE id = ?`).run(conflict.id)
+        supersedes = [conflict.id]
+        supersededId = conflict.id
+      }
+
+      insertObservationStmt.run(
+        id, scopeId, subject, predicate, claimDomain, text,
+        JSON.stringify(evidenceIds), JSON.stringify(supersedes), 'active',
+        input.observedAt ?? new Date().toISOString(), Date.now(),
+      )
+      auditStore.appendAudit({
+        op: 'observation-upsert',
+        targetId: id,
+        scopeId,
+        actor: 'system',
+        reason: 'observation upserted',
+        payload: { supersededId },
+      })
+      db.exec('COMMIT')
+      return { inserted: true, id, row: getObservationById(id), supersededId }
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
     }
-
-    insertObservationStmt.run(
-      id, scopeId, subject, predicate, claimDomain, text,
-      JSON.stringify(evidenceIds), JSON.stringify(supersedes), 'active',
-      input.observedAt ?? new Date().toISOString(), Date.now(),
-    )
-    return { inserted: true, id, row: getObservationById(id), supersededId }
   }
 
   function getObservationById(id) {
@@ -431,6 +536,7 @@ export function openEvidenceLedger(opts = {}) {
     append, getById, setState, updateMetadata, query, byContentHash, listActive, stats,
     getMeta, setMeta,
     upsertObservation, getObservationById, queryObservation, listObservations, getObservationLineage,
+    candidateStore, auditStore,
     close,
   }
 }

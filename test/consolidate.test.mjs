@@ -295,12 +295,12 @@ test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移�
     raw.exec("UPDATE acp_meta SET value = '1' WHERE key = 'schema_version'")
     raw.close()
 
-    // 重新打开 → 迁移到 v2
+    // 重新打开 → 迁移到当前版本（v3）
     const ledger = openEvidenceLedger({ dir })
     try {
       assert.equal(
         ledger.db.prepare("SELECT value FROM acp_meta WHERE key = 'schema_version'").get().value,
-        '2',
+        '3',
       )
       assert.ok(ledger.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observation'").get())
       const items = ledger.query({ scopeId: 'user-global' }).items
