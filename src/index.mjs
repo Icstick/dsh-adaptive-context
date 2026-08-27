@@ -46,6 +46,9 @@ export const Config = z.object({
   // LLM 任务路由（M3 A2）：{task: {provider, model, fallback?, timeoutMs, maxTokens}}；
   // consolidation 任务缺省从 consolidationProvider/consolidationModel 映射（向后兼容）。
   llmTasks: z.any(),
+  // Materialized view 启动校验（M3 C3）：apply 时 verifyView('expression')，
+  // 与 candidate 重放不一致自动 rebuild（默认 true；false = 只校验不重建）。
+  startupRebuild: z.boolean().default(true),
   // Background consolidation（可选：缺省用 constants 默认；llm 路由缺省则走规则兜底）
   consolidationMinEvidence: z.number().step(1).min(1),
   consolidationMinTurns: z.number().step(1).min(1),
@@ -129,7 +132,7 @@ export function normalizeMemosHits(hits, scopeId) {
 
 export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: config.ledgerDir })
-  const acp = createAcpService({ ledger })
+  const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
   const expression = createExpression({ ledger })
 
   // --- Service Definition：注册 ctx.acp ---
@@ -139,6 +142,15 @@ export function apply(ctx, config = {}) {
     ...acp,
     requestPromotion: (candidate, ctxArg) => expression.requestPromotion(candidate, ctxArg ?? ctx),
   })
+
+  // --- M3 C3：启动校验（views are rebuildable）---
+  // verifyView 失配且 startupRebuild=true → 自动重建（含首启未构建视图的首次物化）；
+  // 失败仅告警，绝不阻断插件启动。
+  try {
+    acp.startupVerify()
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] startup verify failed: ' + (err && err.message))
+  }
 
   // --- Background consolidation：LLM 用 withService 可选模式获取 ---
   function resolveLlm() {
