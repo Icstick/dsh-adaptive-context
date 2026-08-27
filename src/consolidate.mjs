@@ -138,7 +138,6 @@ async function deriveViaLlm(evidences, llmCall, logger) {
  * @param {object} opts.ledger - openEvidenceLedger() 返回的 Provider
  * @param {string} [opts.scopeId] - 默认 'user-global'
  * @param {(userText: string, system: string) => Promise<string>} [opts.llmCall] - null 则走规则兜底
- * @param {(candidate: object) => void} [opts.promoteCandidate] - style 候选接缝（requestPromotion）
  * @param {number} [opts.minEvidence] - 默认 CONSOLIDATION_MIN_EVIDENCE
  * @param {number} [opts.minTurns] - 默认 CONSOLIDATION_MIN_TURNS
  * @param {object} [opts.logger] - 默认 console
@@ -149,7 +148,6 @@ export function createConsolidator(opts = {}) {
     ledger,
     scopeId = 'user-global',
     llmCall = null,
-    promoteCandidate = null,
     minEvidence = CONSOLIDATION_MIN_EVIDENCE,
     minTurns = CONSOLIDATION_MIN_TURNS,
     logger = console,
@@ -231,18 +229,18 @@ export function createConsolidator(opts = {}) {
       for (const obs of observations) {
         const res = ledger.upsertObservation({ scopeId, ...obs })
         if (res.inserted || res.row) wrote += 1
-        // 接缝（固定接口）：claimDomain==='style' 候选 → acp.requestPromotion(candidate, ctx)
-        if (obs.claimDomain === 'style' && typeof promoteCandidate === 'function') {
-          const candidate = {
-            ...obs,
-            scopeId,
-            id: res.id,
-            state: res.row?.state ?? 'active',
-          }
-          try {
-            promoteCandidate(candidate)
-          } catch (err) {
-            logger?.warn?.('[acp] promoteCandidate error: ' + (err && err.message))
+        // style 候选（2026-08-27 架构修正）：后台任务无 agent，不能直接发面板审批；
+        // 把源证据标 pending_promotion，下个 turn 的 pre-step（有 agent）统一发起审批。
+        if (obs.claimDomain === 'style') {
+          for (const evId of obs.evidenceIds ?? []) {
+            try {
+              const row = ledger.getById(evId)
+              if (row && row.state === 'active' && row.metadata?.reviewStatus !== 'pending_promotion') {
+                ledger.updateMetadata(evId, { reviewStatus: 'pending_promotion' })
+              }
+            } catch (err) {
+              logger?.warn?.('[acp] style pending mark error: ' + (err && err.message))
+            }
           }
         }
       }

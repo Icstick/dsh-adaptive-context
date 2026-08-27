@@ -176,6 +176,9 @@ export function apply(ctx, config = {}) {
     }, userText, system)
   }
 
+  // T6：已发起过审批请求的 evidence id（防同一候选重复弹窗）
+  const promotionRequested = new Set()
+
   const consolidate = createConsolidator({
     ledger,
     scopeId: scopeOf(ctx),
@@ -183,18 +186,6 @@ export function apply(ctx, config = {}) {
     minEvidence,
     minTurns,
     logger: ctx.logger,
-    // style 候选接缝（固定接口，T6 Expression promotion 预留）：
-    // 若 ctx.acp 有 requestPromotion 方法则调用，必须不抛异常；无则跳过。
-    promoteCandidate: (candidate) => {
-      try {
-        const acpService = ctx.get('acp')
-        if (acpService && typeof acpService.requestPromotion === 'function') {
-          acpService.requestPromotion(candidate, ctx)
-        }
-      } catch (err) {
-        ctx.logger?.warn?.('[acp] requestPromotion error: ' + (err && err.message))
-      }
-    },
   })
 
   // llm 服务重挂载时重建调用闭包（withService 模式，踩坑清单第 5 条）
@@ -270,6 +261,21 @@ export function apply(ctx, config = {}) {
         hasProvider,
         maxTokens: config.hotTokens ?? 300,
       })
+
+      // —— T6 style 审批门（2026-08-27 架构修正）——
+      // consolidation 后台无 agent，只能把 style 候选标 pending_promotion；
+      // 这里 pre-step 有 payload.agent，对未请求过的 pending 候选 fire-and-forget
+      // 发起 approval.request（不 await，审批面板异步弹出，不阻塞 turn）。
+      for (const cand of expression.collectPendingPromotions()) {
+        if (promotionRequested.has(cand.id)) continue
+        promotionRequested.add(cand.id)
+        expression.requestPromotion(
+          { id: cand.id, content: cand.content, claimDomain: cand.claimDomain, sourceRef: cand.sourceRef },
+          ctx,
+          payload.agent,
+        ).catch(() => {})
+      }
+
       if (result.items.length === 0) return decision
       // source-labelled plugin message：untrusted historical context，
       // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。

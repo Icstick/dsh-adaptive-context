@@ -14,6 +14,8 @@ import {
   applyPromotionDecision,
   createExpression,
   buildPromotionRequest,
+  collectPendingPromotions,
+  PENDING_PROMOTION,
   PROMOTION_TOOL_NAME,
   REVIEW_STATUSES,
 } from '../src/expression.mjs'
@@ -47,6 +49,11 @@ function mockCtx(approval) {
     get: (name) => (name === 'approval' ? approval : undefined),
     logger: { debug: () => {}, warn: () => {} },
   }
+}
+
+/** mock agent（ApprovalRequest.agent 必填；pre-step payload.agent 形状） */
+function mockAgent() {
+  return { id: 'agent-1', session: { id: 'session-1' } }
 }
 
 // ── oracle 1：applyPromotionDecision ────────────────────────────────────────
@@ -83,21 +90,23 @@ test('applyPromotionDecision：非法 decision 抛 TypeError', (t) => {
 
 // ── oracle 2：requestPromotion 走 approval 审批门 ───────────────────────────
 
-test('requestPromotion：approval 发起调用，approved 回调 → reviewStatus=promoted', async (t) => {
+test('requestPromotion：approval 发起调用，allowed-once 回调 → reviewStatus=promoted', async (t) => {
   const { ledger } = fresh(t)
   const ev = seedStyleEvidence(ledger)
   const expression = createExpression({ ledger })
   const calls = []
   const approval = {
-    request: async (req) => { calls.push(req); return 'approved' },
+    request: async (req) => { calls.push(req); return 'allowed-once' },
   }
   const row = await expression.requestPromotion(
     { id: ev.id, content: ev.content, claimDomain: ev.claimDomain, sourceRef: ev.sourceRef },
     mockCtx(approval),
+    mockAgent(),
   )
   assert.equal(row.metadata.reviewStatus, 'promoted')
-  // 发起调用：载荷带 toolName + 证据内容 + source 溯源
+  // 发起调用：载荷带 agent + toolName + 证据内容 + source 溯源
   assert.equal(calls.length, 1)
+  assert.equal(calls[0].agent.id, 'agent-1')
   assert.equal(calls[0].toolName, PROMOTION_TOOL_NAME)
   assert.ok(calls[0].reason.includes(ev.id))
   assert.ok(calls[0].reason.includes(ev.content))
@@ -112,6 +121,7 @@ test('requestPromotion：rejected 回调 → reviewStatus=dismissed', async (t) 
   const row = await expression.requestPromotion(
     { id: ev.id, content: ev.content, claimDomain: ev.claimDomain },
     mockCtx(approval),
+    mockAgent(),
   )
   assert.equal(row.metadata.reviewStatus, 'dismissed')
 })
@@ -121,7 +131,7 @@ test('requestPromotion：审批服务故障（request 抛错）→ fail-open 不
   const ev = seedStyleEvidence(ledger)
   const expression = createExpression({ ledger })
   const approval = { request: async () => { throw new Error('approval backend down') } }
-  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval))
+  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval), mockAgent())
   assert.equal(res, null)
   assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
 })
@@ -131,7 +141,7 @@ test('requestPromotion：未知 outcome（如 unavailable）→ 不改 reviewSta
   const ev = seedStyleEvidence(ledger)
   const expression = createExpression({ ledger })
   const approval = { request: async () => 'unavailable' }
-  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval))
+  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval), mockAgent())
   assert.equal(res, null)
   assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
 })
@@ -142,7 +152,7 @@ test('requestPromotion：ctx.get 返回 undefined → 静默跳过不抛错', as
   const { ledger } = fresh(t)
   const ev = seedStyleEvidence(ledger)
   const expression = createExpression({ ledger })
-  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(undefined))
+  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(undefined), mockAgent())
   assert.equal(res, null)
   assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
 })
@@ -151,29 +161,77 @@ test('requestPromotion：approval 存在但无 request 方法 → 静默跳过�
   const { ledger } = fresh(t)
   const ev = seedStyleEvidence(ledger)
   const expression = createExpression({ ledger })
-  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx({ config: {} }))
+  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx({ config: {} }), mockAgent())
   assert.equal(res, null)
   assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
+})
+
+test('requestPromotion：无 agent → 静默跳过不抛错（ApprovalRequest.agent 必填）', async (t) => {
+  const { ledger } = fresh(t)
+  const ev = seedStyleEvidence(ledger)
+  const expression = createExpression({ ledger })
+  const called = []
+  const approval = { request: async (req) => { called.push(req); return 'allowed-once' } }
+  const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval), undefined)
+  assert.equal(res, null)
+  assert.equal(called.length, 0)
+  assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
+})
+
+test('collectPendingPromotions：只收集 active + pending_promotion 证据', (t) => {
+  const { ledger } = fresh(t)
+  const ev = seedStyleEvidence(ledger)
+  const other = ledger.append({
+    sourceClass: 'user_input', authority: 'user_explicit', confidence: 1, durability: 0.5,
+    sensitivity: 'private', claimDomain: 'user_fact', content: '普通事实', sourceRef: { sessionEventId: 'x2' },
+  })
+  assert.equal(collectPendingPromotions(ledger).length, 0)
+  ledger.updateMetadata(ev.id, { reviewStatus: PENDING_PROMOTION })
+  const pending = collectPendingPromotions(ledger)
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].id, ev.id)
+  assert.equal(pending[0].metadata.reviewStatus, PENDING_PROMOTION)
+  // 非 pending 证据不进入
+  assert.equal(ledger.getById(other.id).metadata?.reviewStatus, undefined)
+})
+
+test('完整链路：pending 候选 → approval 审批 → promoted（pre-step 触发模式）', async (t) => {
+  const { ledger } = fresh(t)
+  const ev = seedStyleEvidence(ledger)
+  ledger.updateMetadata(ev.id, { reviewStatus: PENDING_PROMOTION })
+  const expression = createExpression({ ledger })
+  const approval = { request: async () => 'allowed-once' }
+  const pending = expression.collectPendingPromotions()
+  assert.equal(pending.length, 1)
+  const row = await expression.requestPromotion(
+    { id: pending[0].id, content: pending[0].content, claimDomain: pending[0].claimDomain, sourceRef: pending[0].sourceRef },
+    mockCtx(approval),
+    mockAgent(),
+  )
+  assert.equal(row.metadata.reviewStatus, 'promoted')
+  // 审批后不再是 pending
+  assert.equal(collectPendingPromotions(ledger).length, 0)
 })
 
 test('requestPromotion：candidate 无 id → 静默跳过不抛错', async (t) => {
   const { ledger } = fresh(t)
   const expression = createExpression({ ledger })
-  const approval = { request: async () => 'approved' }
-  const res = await expression.requestPromotion({ content: '无 id 候选' }, mockCtx(approval))
+  const approval = { request: async () => 'allowed-once' }
+  const res = await expression.requestPromotion({ content: '无 id 候选' }, mockCtx(approval), mockAgent())
   assert.equal(res, null)
 })
 
 // ── 契约辅助 ───────────────────────────────────────────────────────────────
 
-test('buildPromotionRequest：载荷含证据内容 + source 溯源（M2-PLAN 5B payload）', () => {
+test('buildPromotionRequest：载荷含 agent + 证据内容 + source 溯源（DSH ApprovalRequest 契约）', () => {
   const req = buildPromotionRequest({
     id: 'ev_1',
     content: '先给结论',
     claimDomain: 'style',
     sourceRef: { sessionEventId: 'x' },
-  })
+  }, { id: 'agent-9' })
   assert.equal(req.toolName, 'acp.promotion')
+  assert.equal(req.agent.id, 'agent-9')
   assert.ok(req.reason.includes('ev_1'))
   assert.ok(req.reason.includes('先给结论'))
   assert.ok(req.reason.includes('"sessionEventId":"x"'))

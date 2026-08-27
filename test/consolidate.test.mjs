@@ -210,41 +210,43 @@ test('不同键（predicate/claimDomain 不同）不冲突，两条都 active', 
   assert.equal(items.length, 2)
 })
 
-// ===================== 决策 5：style 候选接缝（requestPromotion） =====================
+// ===================== 决策 5：style 候选 → pending_promotion 标记（2026-08-27 架构修正） =====================
+// 后台任务无 agent，不能直接发面板审批；style 候选的源证据标 pending_promotion，
+// 由下个 turn 的 pre-step（有 agent）发起 approval.request（expression.collectPendingPromotions）。
 
-test('接缝：claimDomain==="style" 候选触发 promoteCandidate，其余不触发', async (t) => {
+test('style 候选：源证据标 pending_promotion，非 style 候选不标', async (t) => {
   const ledger = freshLedger(t)
-  addEvidence(ledger, 1)
+  addEvidence(ledger, 2)
+  const evs = ledger.listActive('user-global') // observedAt 升序：e-1, e-2
+  const id1 = evs[0].id
+  const id2 = evs[1].id
   const llmCall = async () => JSON.stringify({
     observations: [
-      { subject: '语气', predicate: '偏好', claimDomain: 'style', text: '喜欢简洁', evidenceIds: ['e1'] },
-      { subject: '包管理器', predicate: '选择', claimDomain: 'work', text: '用 pnpm', evidenceIds: ['e2'] },
+      { subject: '语气', predicate: '偏好', claimDomain: 'style', text: '喜欢简洁', evidenceIds: [id1] },
+      { subject: '包管理器', predicate: '选择', claimDomain: 'work', text: '用 pnpm', evidenceIds: [id2] },
     ],
   })
-  const promoted = []
-  const c = createConsolidator({
-    ledger, minEvidence: 1, minTurns: 100, llmCall,
-    promoteCandidate: (cand) => { promoted.push(cand) },
-  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
   await c.runOnce()
 
-  assert.equal(promoted.length, 1)
-  assert.equal(promoted[0].claimDomain, 'style')
-  assert.equal(promoted[0].subject, '语气')
+  assert.equal(ledger.getById(id1).metadata.reviewStatus, 'pending_promotion')
+  assert.equal(ledger.getById(id2).metadata?.reviewStatus, undefined)
 })
 
-test('接缝：promoteCandidate 抛异常不阻断 consolidation（fail-open）', async (t) => {
+test('style 候选：已标 pending 的证据不重复标；证据不存在静默跳过（fail-open）', async (t) => {
   const ledger = freshLedger(t)
   addEvidence(ledger, 1)
+  const id1 = ledger.listActive('user-global')[0].id
+  ledger.updateMetadata(id1, { reviewStatus: 'pending_promotion' })
   const llmCall = async () => JSON.stringify({
-    observations: [{ subject: '语气', predicate: '偏好', claimDomain: 'style', text: 'x', evidenceIds: ['e1'] }],
+    observations: [
+      { subject: '语气', predicate: '偏好', claimDomain: 'style', text: 'x', evidenceIds: [id1, 'ghost'] },
+    ],
   })
-  const c = createConsolidator({
-    ledger, minEvidence: 1, minTurns: 100, llmCall,
-    promoteCandidate: () => { throw new Error('boom') },
-  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
   const r = await c.runOnce() // 不应抛
   assert.equal(r.observations, 1)
+  assert.equal(ledger.getById(id1).metadata.reviewStatus, 'pending_promotion') // 不重复标也不清
 })
 
 // ===================== 纯函数：解析 / 规则兜底 / prompt =====================
