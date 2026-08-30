@@ -8,6 +8,8 @@
 // schema v3（M3 B1，2026-08-28）：新增 candidate / candidate_events / audit 三表；
 // store 层写操作（append / supersede / observation-upsert）内置 audit 行（actor='system'），
 // 数据写 + audit 写同事务提交（写后即审）。
+// v4（2026-08-30，feature/injection-isolation）：evidence 表新增 session_id 列
+// （会话分层注入/隔离用）；存量库 ALTER TABLE + 从 source_ref.sessionEventId 解析回填。
 
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS acp_meta (
 CREATE TABLE IF NOT EXISTS evidence (
   id            TEXT PRIMARY KEY,      -- evidenceIdOf(sourceRef, contentHash)
   scope_id      TEXT NOT NULL,
+  session_id    TEXT NOT NULL DEFAULT '',  -- 来源会话（v4；存量从 source_ref 回填）
   agent_key     TEXT NOT NULL DEFAULT '',
   session_type  TEXT NOT NULL,
   source_class  TEXT NOT NULL,
@@ -164,9 +167,13 @@ export function openEvidenceLedger(opts = {}) {
     db.close()
     throw new Error(`ACP ledger schema mismatch: db=${existing.value} expected=${SCHEMA_VERSION}`)
   }
+  // 迁移始终尝试（migrateSessionId 幂等：列已存在即 no-op）——版本号相同也可能是
+  // 旧版本代码建的库（如 v3 库升级前已写入 version 3），不能只靠版本号差异触发。
+  // 历史迁移：v1 → v2 新增 observation 表；v2 → v3 新增 candidate / candidate_events / audit 表；
+  // v3 → v4 evidence 加 session_id 列并从 source_ref 回填。
+  // SCHEMA 全部 CREATE TABLE IF NOT EXISTS，不破坏既有表；新库亦走此路径写入当前版本号。
+  migrateSessionId(db)
   if (existingVersion !== SCHEMA_VERSION) {
-    // 迁移：v1 → v2 新增 observation 表；v2 → v3 新增 candidate / candidate_events / audit 表。
-    // SCHEMA 全部 CREATE TABLE IF NOT EXISTS，不破坏既有表；新库亦走此路径写入当前版本号。
     db.prepare('INSERT OR REPLACE INTO acp_meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION))
   }
 
@@ -176,11 +183,11 @@ export function openEvidenceLedger(opts = {}) {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO evidence (
-      id, scope_id, agent_key, session_type, source_class, authority,
+      id, scope_id, session_id, agent_key, session_type, source_class, authority,
       confidence, durability, sensitivity, claim_domain, content, content_hash,
       source_ref, observed_at, valid_from, valid_until, state, supersedes, metadata,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   const updateStateStmt = db.prepare('UPDATE evidence SET state = ?, updated_at = ? WHERE id = ?')
@@ -223,6 +230,8 @@ export function openEvidenceLedger(opts = {}) {
     const state = input.state ?? 'active'
 
     const scopeId = input.scopeId ?? 'user-global'
+    // sessionId：显式传入优先；否则从 sourceRef 的 sessionEventId（"sessionId:seq"）派生
+    const sessionId = input.sessionId ?? sessionIdOfSourceRef(sourceRef)
 
     // 数据写 + audit 写同事务（M3 B1：写后即审，原子提交）
     db.exec('BEGIN IMMEDIATE')
@@ -230,6 +239,7 @@ export function openEvidenceLedger(opts = {}) {
       insertStmt.run(
         id,
         scopeId,
+        sessionId,
         input.agentKey ?? '',
         input.sessionType ?? 'root',
         input.sourceClass,
@@ -331,6 +341,11 @@ export function openEvidenceLedger(opts = {}) {
     const conds = []
     const params = []
     if (q.scopeId) { conds.push('scope_id = ?'); params.push(q.scopeId) }
+    if (q.sessionId === '') { conds.push("session_id = ''") }
+    else if (typeof q.sessionId === 'string') { conds.push('session_id = ?'); params.push(q.sessionId) }
+    else if (q.sessionId && typeof q.sessionId === 'object' && typeof q.sessionId.not === 'string') {
+      conds.push('session_id != ?'); params.push(q.sessionId.not)
+    }
     if (q.agentKey !== undefined) { conds.push('agent_key = ?'); params.push(q.agentKey) }
     if (q.state) { conds.push('state = ?'); params.push(q.state) }
     if (q.claimDomain) { conds.push('claim_domain = ?'); params.push(q.claimDomain) }
@@ -541,10 +556,54 @@ export function openEvidenceLedger(opts = {}) {
   }
 }
 
+/**
+ * 从 sourceRef 解析来源会话 id（v4 session_id 列派生）。
+ * 解析顺序：sessionId → conversationId → sessionEventId（"sessionId:seq" 取前段）→ ''。
+ * @param {object} ref - sourceRef（JSON.parse 后）
+ * @returns {string}
+ */
+export function sessionIdOfSourceRef(ref) {
+  if (!ref || typeof ref !== 'object') return ''
+  const sid = ref.sessionId ?? ref.session_id
+  if (typeof sid === 'string' && sid) return sid
+  const cid = ref.conversationId ?? ref.conversation_id
+  if (typeof cid === 'string' && cid) return cid
+  const sev = ref.sessionEventId ?? ref.session_event_id
+  if (typeof sev === 'string' && sev) {
+    const i = sev.lastIndexOf(':')
+    return i > 0 ? sev.slice(0, i) : sev
+  }
+  return ''
+}
+
+/**
+ * v3 → v4 迁移：evidence 表加 session_id 列 + 从 source_ref 回填存量行。
+ * 幂等：列已存在（新库 SCHEMA 直建）则 no-op；回填只处理可解析的会话。
+ * @param {object} db - DatabaseSync 句柄
+ */
+function migrateSessionId(db) {
+  const cols = db.prepare('PRAGMA table_info(evidence)').all()
+  if (!cols.some((c) => c.name === 'session_id')) {
+    // 旧库（v1-v3）无 session_id 列：加列 + 从 source_ref 回填
+    db.exec("ALTER TABLE evidence ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+    const rows = db.prepare('SELECT id, source_ref FROM evidence').all()
+    const upd = db.prepare('UPDATE evidence SET session_id = ? WHERE id = ?')
+    for (const r of rows) {
+      let ref = {}
+      try { ref = JSON.parse(r.source_ref) } catch { /* 解析失败保持 '' */ }
+      const sid = sessionIdOfSourceRef(ref)
+      if (sid) upd.run(sid, r.id)
+    }
+  }
+  // 索引必须在加列之后建（旧库 SCHEMA 阶段建会失败）；新库此处幂等
+  db.exec('CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence (session_id, state)')
+}
+
 function toEvidence(r) {
   return {
     id: r.id,
     scopeId: r.scope_id,
+    sessionId: r.session_id,
     agentKey: r.agent_key,
     sessionType: r.session_type,
     sourceClass: r.source_class,

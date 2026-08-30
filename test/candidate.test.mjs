@@ -354,7 +354,7 @@ const V2_EVIDENCE_SQL = [
   , "INSERT INTO acp_meta (key, value) VALUES ('schema_version', '2');"
 ].join('\n')
 
-test('迁移 v2→v3：旧库打开后三表存在、schema_version=3、旧数据保留、写操作可用且产生 audit', () => {
+test('迁移 v2→v4：旧库打开后三表存在、schema_version=4、旧数据保留、写操作可用且产生 audit', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-candidate-migrate-'))
   try {
     // 手工构造 v2 库（schema v2 原样：acp_meta + evidence + observation）
@@ -371,7 +371,7 @@ test('迁移 v2→v3：旧库打开后三表存在、schema_version=3、旧数�
 
     // 用新代码打开：迁移应发生
     const ledger = openEvidenceLedger({ dir })
-    assert.equal(ledger.getMeta('schema_version'), '3')
+    assert.equal(ledger.getMeta('schema_version'), '4')
 
     // 三表存在
     const tables = ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('candidate','candidate_events','audit')")
@@ -399,9 +399,9 @@ test('迁移 v2→v3：旧库打开后三表存在、schema_version=3、旧数�
   }
 });
 
-test('新库：schema_version 直接为 3，三表存在（CANDIDATE_STATES 导出正确）', (t) => {
+test('新库：schema_version 直接为 4，三表存在（CANDIDATE_STATES 导出正确）', (t) => {
   const ledger = freshLedger(t)
-  assert.equal(ledger.getMeta('schema_version'), '3')
+  assert.equal(ledger.getMeta('schema_version'), '4')
   const tables = ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('candidate','candidate_events','audit')")
     .all().map((r) => r.name).sort()
   assert.deepEqual(tables, ['audit', 'candidate', 'candidate_events'])

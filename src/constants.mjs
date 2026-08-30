@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 export const DEFAULT_DB_NAME = 'acp-ledger.db'
 
 /** Evidence 状态机 */

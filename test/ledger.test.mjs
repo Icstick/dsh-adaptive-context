@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { createAcpService } from '../src/service.mjs'
 import { writeGuard, readGuard } from '../src/governance.mjs'
@@ -148,4 +149,64 @@ test('query 支持 temporal validAt 过滤', (t) => {
   assert.equal(in2025.items[0].content, '2025 用 Vue')
   assert.equal(in2026.items.length, 1)
   assert.equal(in2026.items[0].content, '2026 用 React')
+})
+test('v3 → v4 迁移：旧库加 session_id 列并从 source_ref 回填', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-mig-'))
+  t.after(() => { rmSync(dir, { recursive: true, force: true }) })
+  // 手工构造 v3 旧库（无 session_id 列，schema_version=3）
+  const dbPath = path.join(dir, 'acp-ledger.db')
+  const old = new DatabaseSync(dbPath)
+  old.exec(`
+    CREATE TABLE acp_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO acp_meta (key, value) VALUES ('schema_version', '3');
+    CREATE TABLE evidence (
+      id TEXT PRIMARY KEY, scope_id TEXT NOT NULL, agent_key TEXT NOT NULL DEFAULT '',
+      session_type TEXT NOT NULL, source_class TEXT NOT NULL, authority TEXT NOT NULL,
+      confidence REAL NOT NULL, durability REAL NOT NULL, sensitivity TEXT NOT NULL,
+      claim_domain TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL,
+      source_ref TEXT NOT NULL, observed_at TEXT NOT NULL, valid_from TEXT, valid_until TEXT,
+      state TEXT NOT NULL DEFAULT 'active', supersedes TEXT NOT NULL DEFAULT '[]',
+      metadata TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO evidence (id, scope_id, session_type, source_class, authority, confidence, durability, sensitivity,
+      claim_domain, content, content_hash, source_ref, observed_at, state, supersedes, metadata, created_at, updated_at)
+    VALUES ('legacy-1', 'user-global', 'root', 'user_input', 'user_explicit', 0.9, 0.5, 'private',
+      'user_fact', '旧数据', 'h1', '{"sessionEventId":"old-session:5"}', '2026-08-25T00:00:00.000Z',
+      'active', '[]', '{}', 1, 1);
+  `)
+  old.close()
+
+  // 打开触发迁移
+  const ledger = openEvidenceLedger({ dir })
+  const migrated = ledger.getById('legacy-1')
+  assert.equal(migrated.sessionId, 'old-session') // source_ref 解析回填
+  // 新写入自动带 session_id（无显式时从 sourceRef 派生）
+  ledger.append(baseEv({ sourceRef: { sessionEventId: 'new-session:1' }, content: '新数据' }))
+  assert.equal(ledger.query({ sessionId: 'new-session' }).total, 1)
+  ledger.close()
+})
+
+test('query sessionId 过滤：精确匹配与排除', (t) => {
+  const ledger = freshLedger(t)
+  const mk = (sid, content) => ledger.append(baseEv({
+    sourceRef: { sessionEventId: sid + ':1' }, content,
+  }))
+  mk('session-a', 'A 会话的事实')
+  mk('session-b', 'B 会话的事实')
+  mk('session-a', 'A 会话另一条')
+
+  assert.equal(ledger.query({ sessionId: 'session-a' }).total, 2)
+  assert.equal(ledger.query({ sessionId: 'session-b' }).total, 1)
+  assert.equal(ledger.query({ sessionId: { not: 'session-a' } }).total, 1)
+  assert.equal(ledger.query({ sessionId: { not: 'session-a' } }).items[0].content, 'B 会话的事实')
+  // 空字符串 = 无来源会话（旧数据兜底）
+  ledger.append(baseEv({ sourceRef: {}, content: '无来源' }))
+  assert.equal(ledger.query({ sessionId: '' }).total, 1)
+})
+
+test('append 显式 sessionId 优先于 sourceRef 派生', (t) => {
+  const ledger = freshLedger(t)
+  ledger.append(baseEv({ sourceRef: { sessionEventId: 'derived-sid:1' }, sessionId: 'explicit-sid', content: '显式会话' }))
+  assert.equal(ledger.query({ sessionId: 'explicit-sid' }).total, 1)
+  assert.equal(ledger.query({ sessionId: 'derived-sid' }).total, 0)
 })
