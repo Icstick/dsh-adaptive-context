@@ -16,7 +16,7 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
-import { compose, renderSourceLabelled } from './composer.mjs'
+import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
 import { createLlmRouter } from './providers/llm-router.mjs'
 import { createConsolidator } from './consolidate.mjs'
@@ -36,6 +36,16 @@ export const Config = z.object({
   hotTokens: z.number().step(1).min(1).default(300),
   recallLimit: z.number().step(1).min(1).default(20),
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
+  // 跨会话注入闸门（2026-08-30 决策 D1，ISSUES-INJECTION-ISOLATION.md F7）：
+  //   non-instructional（默认）——跨会话只注入非指令性内容（agent_authored/external_tool…），
+  //                             user_input/user_correction 跨会话不注入；
+  //   all —— 跨会话全类别注入（utility×0.3 惩罚 + session provenance 标记）；
+  //   none —— 不注入任何跨会话内容。
+  crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))).default('non-instructional'),
+  // 子代理会话降权（2026-08-30 决策 D2）：session.header.origin==='subagent' 时
+  // kind='user' 的消息（父 agent 派发 prompt）降权为 agent_inference（记录但 quarantine），
+  // 避免父任务书冒充用户指令。
+  subagentDowngrade: z.boolean().default(true),
   debug: z.boolean().default(false),
   // MemOS RecallProvider（T3 P0-3）：semantic 分来源，MVP 实验接入
   memosBaseUrl: z.string().default('http://127.0.0.1:18801'),
@@ -300,6 +310,8 @@ export function apply(ctx, config = {}) {
         sessionId: session?.id ?? '',
         agentKey: event.agentKey ?? '',
         sessionType: event.sessionType ?? 'root',
+        // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine
+        subagent: config.subagentDowngrade === true && session?.header?.origin === 'subagent',
       })
       if (!ev) return
       const res = acp.append(ev)
@@ -327,11 +339,13 @@ export function apply(ctx, config = {}) {
       if (!decision || decision.kind !== 'enter') return decision
       const userText = userTextFromMessages(decision.messages)
       const scopeId = scopeOf(ctx)
-      const ledgerCandidates = ledger.query({
-        scopeId,
-        state: 'active',
-        limit: config.recallLimit ?? 20,
-      }).items
+      // 会话分层（2026-08-30，ISSUES-INJECTION-ISOLATION.md F5/F7）：
+      // 本会话全类别 + 跨会话受限（类别闸门与惩罚由 compose 的 currentSessionId 处理）。
+      const sessionId = payload?.agent?.session?.id ?? ''
+      const ledgerCandidates = [
+        ...ledger.query({ scopeId, state: 'active', sessionId, limit: config.recallLimit ?? 20 }).items,
+        ...ledger.query({ scopeId, state: 'active', sessionId: { not: sessionId }, limit: config.recallLimit ?? 20 }).items,
+      ]
 
       // —— M3 B3：materialized view 注入（expression section hot path）——
       // readExpression() 有内容 → 注入 style 候选（promoted 候选 → view 行，快照自足）；
@@ -365,6 +379,8 @@ export function apply(ctx, config = {}) {
         hasProvider,
         providerWeights,
         maxTokens: config.hotTokens ?? 300,
+        currentSessionId: sessionId,
+        crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
       })
 
       // —— T6 style 审批门（2026-08-27 架构修正）——
@@ -384,7 +400,7 @@ export function apply(ctx, config = {}) {
       if (result.items.length === 0) return decision
       // source-labelled plugin message：untrusted historical context，
       // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
-      const body = renderSourceLabelled(result.items)
+      const body = renderSourceLabelled(result.items, { currentSessionId: sessionId })
       const ours = createUserMessage({
         content: [{ type: 'text', text: body }],
         source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },

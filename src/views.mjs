@@ -72,6 +72,7 @@ export function buildExpressionRows({ candidateStore, ledger, scopeId } = {}) {
         id: ev.id,
         candidateId: c.id,
         scopeId: c.scopeId ?? ev.scopeId,
+        sessionId: ev.sessionId ?? '',
         sourceClass: ev.sourceClass ?? 'evidence',
         authority: ev.authority ?? 'user_explicit',
         confidence: typeof ev.confidence === 'number' ? ev.confidence : 0.5,

@@ -10,6 +10,8 @@ test('plugin config validates defaults through Standard Schema', async () => {
       hotTokens: 300,
       recallLimit: 20,
       targetDomain: 'work',
+      crossSessionPolicy: 'non-instructional',
+      subagentDowngrade: true,
       debug: false,
       memosBaseUrl: 'http://127.0.0.1:18801',
       memosEnabled: true,

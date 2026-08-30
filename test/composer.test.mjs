@@ -238,4 +238,86 @@ test('A3 单 provider 与 M2 排序一致（回归）：归一化只改尺度不
   const legacy = compose([a, b], { ...A3_QUERY, hasProvider: true })
   assert.deepEqual(withWeights.items.map((i) => i.id), legacy.items.map((i) => i.id))
 })
+// ===================== 会话隔离（2026-08-30，ISSUES-INJECTION-ISOLATION.md） =====================
+
+const sev = (over = {}) => ev({ ...over })
+
+test('会话隔离默认（non-instructional）：跨会话 user_input 被闸门拦截，agent_authored 放行', () => {
+  const cands = [
+    sev({ id: 'same-user', content: '本会话用户说的', sessionId: 'cur-session' }),
+    sev({ id: 'other-user', content: '其他会话的用户指令', sessionId: 'other-session' }),
+    sev({ id: 'other-agent', content: '其他会话的经验总结', sessionId: 'other-session', sourceClass: 'agent_authored', authority: 'single_observation', claimDomain: 'experience' }),
+    sev({ id: 'no-sid', content: '外部源（无会话）' }),
+  ]
+  const r = compose(cands, { query: '隔离策略', scopeId: 'user-global', currentSessionId: 'cur-session' })
+  const ids = r.items.map((i) => i.id)
+  assert.ok(ids.includes('same-user'), '本会话 user_input 必须进入')
+  assert.ok(!ids.includes('other-user'), '跨会话 user_input 默认不注入')
+  assert.ok(ids.includes('other-agent'), '跨会话 agent_authored 允许注入')
+  assert.ok(ids.includes('no-sid'), '无 sessionId 候选不受闸门影响')
+  assert.ok(r.dropped.some((d) => d.id === 'other-user' && d.reason === 'cross-session-instructional'))
+  // 跨会话候选带 crossSession 标记（供 utility 惩罚）
+  const cross = r.items.find((i) => i.id === 'other-agent')
+  assert.equal(cross.crossSession, true)
+})
+
+test('会话隔离 none：跨会话内容全部拦截', () => {
+  const cands = [
+    sev({ id: 'same', content: '本会话内容', sessionId: 'cur-session' }),
+    sev({ id: 'other', content: '跨会话内容', sessionId: 'other-session' }),
+  ]
+  const r = compose(cands, { query: '隔离策略', scopeId: 'user-global', currentSessionId: 'cur-session', crossSessionPolicy: 'none' })
+  assert.deepEqual(r.items.map((i) => i.id), ['same'])
+  assert.ok(r.dropped.some((d) => d.id === 'other' && d.reason === 'cross-session-blocked'))
+})
+
+test('会话隔离 all：跨会话 user_input 允许但带惩罚标记', () => {
+  const cands = [
+    sev({ id: 'other-user', content: '其他会话的用户指令', sessionId: 'other-session' }),
+  ]
+  const r = compose(cands, { query: '隔离策略', scopeId: 'user-global', currentSessionId: 'cur-session', crossSessionPolicy: 'all' })
+  assert.equal(r.items.length, 1)
+  assert.equal(r.items[0].crossSession, true)
+})
+
+test('utilityOf：crossSession 惩罚系数 0.3', () => {
+  const a = utilityOf(sev({ content: '包管理器用 pnpm', crossSession: true }), { query: '包管理器' })
+  const b = utilityOf(sev({ content: '包管理器用 pnpm' }), { query: '包管理器' })
+  assert.ok(a.utility < b.utility)
+  assert.ok(Math.abs(a.utility - b.utility * 0.3) < 1e-9)
+})
+
+test('不传 currentSessionId → 维持旧行为（不隔离不惩罚）', () => {
+  const cands = [
+    sev({ id: 'x', content: '任意内容', sessionId: 'some-session' }),
+  ]
+  const r = compose(cands, { query: '隔离策略', scopeId: 'user-global' })
+  assert.equal(r.items.length, 1)
+  assert.equal(r.items[0].crossSession, undefined)
+})
+
+test('renderSourceLabelled：跨会话条目带 session 短码与一次性引导语', () => {
+  const items = [
+    sev({ id: 'a', content: '本会话内容', sessionId: 'cur-session-1234' }),
+    sev({ id: 'b', content: '跨会话内容一', sessionId: 'other-session-9999', sourceClass: 'agent_authored' }),
+    sev({ id: 'c', content: '跨会话内容二', sessionId: 'other-session-9999', sourceClass: 'agent_authored' }),
+  ]
+  const s = renderSourceLabelled(items, { currentSessionId: 'cur-session-1234' })
+  // 引导语只出现一次
+  assert.equal(s.includes('以下条目来自其他会话的历史记录'), true)
+  assert.equal((s.match(/以下条目来自其他会话的历史记录/g) ?? []).length, 1)
+  // 本会话条目无 session 标签
+  assert.ok(!s.includes('[acp:user_input | id=a | domain=user_fact | session='), s)
+  // 跨会话条目带短码标签
+  assert.ok(s.includes('[acp:agent_authored | id=b | domain=user_fact | session=other-se'), s)
+  assert.ok(s.includes('session=other-se'), s)
+})
+
+test('renderSourceLabelled：无 currentSessionId 时维持原格式（无引导语无标签）', () => {
+  const s = renderSourceLabelled([sev({ id: 'a', content: '内容', sessionId: 'x-session' })])
+  assert.ok(!s.includes('以下条目来自其他会话'))
+  assert.ok(!s.includes('| session='))
+  assert.equal(s, '[acp:user_input | id=a | domain=user_fact] 内容')
+})
+
 
