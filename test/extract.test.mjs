@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   isEvidenceWorthy, extractText, sourceClassOf, authorityOf,
-  claimDomainOf, isCorrection, toEvidenceCandidate,
+  claimDomainOf, isCorrection, toEvidenceCandidate, isSystemInjected,
 } from '../src/extract.mjs'
 import { evidenceIdOf } from '../src/constants.mjs'
 
@@ -91,4 +91,121 @@ test('真实 DSH 事件：agent/inbox/spliced 工具结果 → external_tool', (
 test('真实 DSH 事件：turn/start 无文本不摄入', () => {
   const ev = { type: 'turn/start', seq: 5, data: { turn: 1 } }
   assert.equal(isEvidenceWorthy(ev), false)
+})
+test('send_message 续派（coordinator relay）→ agent_authored（不再 fallback user_input）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 11,
+    data: {
+      inserted: [{
+        content: [{ type: 'text', text: '继续完成剩余的部分，不要改动已有代码' }],
+        source: { kind: 'coordinator', form: 'relay', senderSessionId: 'parent-1' },
+        role: 'user', id: 'msg-3',
+      }],
+    },
+  }
+  assert.equal(sourceClassOf(ev), 'agent_authored')
+  assert.equal(authorityOf(ev), 'single_observation')
+  assert.equal(claimDomainOf(ev), 'experience')
+  assert.equal(isCorrection(ev), false) // 非 user 来源永不判纠正
+})
+
+test('子代理完成通知（subagent-settled）→ agent_authored', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 12,
+    data: {
+      inserted: [{
+        content: [{ type: 'text', text: 'Background subagent child-1 finished and will do no further work unless you send it more.' }],
+        source: { kind: 'subagent-settled', form: 'notice', senderSessionId: 'child-1' },
+        role: 'user', id: 'msg-4',
+      }],
+    },
+  }
+  assert.equal(sourceClassOf(ev), 'agent_authored')
+  assert.equal(isCorrection(ev), false)
+})
+
+test('未知 source.kind → agent_authored（保守，不再冒充 user_input）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 13,
+    data: {
+      inserted: [{ content: [{ type: 'text', text: '来自未知来源的消息' }], source: { kind: 'mystery-kind' }, role: 'user', id: 'msg-5' }],
+    },
+  }
+  assert.equal(sourceClassOf(ev), 'agent_authored')
+  assert.equal(authorityOf(ev), 'single_observation')
+  assert.equal(claimDomainOf(ev), 'experience')
+})
+
+test('子代理任务书（含纠正词）不判 correction → user_input', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 14,
+    data: {
+      inserted: [{
+        content: [{ type: 'text', text: '你是 dsh-desktop-shell 项目的 M4-C 子代理 C1。任务：实现 crates/browser-provider（纯逻辑 crate）。不要改动其他 crate 的接口。' }],
+        source: { kind: 'user' }, role: 'user', id: 'msg-6',
+      }],
+    },
+  }
+  assert.equal(isCorrection(ev), false) // 任务书特征负向排除
+  assert.equal(sourceClassOf(ev), 'user_input')
+  assert.equal(authorityOf(ev), 'user_explicit')
+  assert.equal(claimDomainOf(ev), 'user_fact')
+})
+
+test('短纠正句不受任务书排除影响（"你是对的，不要用那个方案"）', () => {
+  const ev = { type: 'user/message', id: 'e8', content: '你是对的，不要用那个方案' }
+  assert.equal(isCorrection(ev), true)
+  assert.equal(sourceClassOf(ev), 'user_correction')
+})
+
+test('tool 结果含纠正词不判 correction', () => {
+  const ev = { type: 'tool/result', id: 'e9', content: 'lint 输出：不要使用 console.log，改用 logger' }
+  assert.equal(isCorrection(ev), false)
+  assert.equal(sourceClassOf(ev), 'external_tool')
+})
+
+test('system-reminder 内容不摄入', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 15,
+    data: {
+      inserted: [{
+        content: [{ type: 'text', text: '<system-reminder> Additional instructions from: AGENTS.md  T...' }],
+        source: { kind: 'user' }, role: 'user', id: 'msg-7',
+      }],
+    },
+  }
+  assert.equal(isEvidenceWorthy(ev), false)
+  assert.equal(isSystemInjected('<system-reminder> x'), true)
+  assert.equal(isSystemInjected('普通用户消息'), false)
+})
+
+test('子代理会话降权：kind=user 消息 → agent_authored / agent_inference / experience（quarantine）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 16,
+    data: {
+      inserted: [{ content: [{ type: 'text', text: '你是子代理。任务：实现 feature X。不要改其他部分。' }], source: { kind: 'user' }, role: 'user', id: 'msg-8' }],
+    },
+  }
+  const cand = toEvidenceCandidate(ev, { sessionId: 'child-session', subagent: true })
+  assert.equal(cand.sourceClass, 'agent_authored')
+  assert.equal(cand.authority, 'agent_inference')
+  assert.equal(cand.claimDomain, 'experience')
+  assert.equal(cand.confidence, 0.5)
+  assert.equal(cand.durability, 0.5)
+  // sourceRef 仍保留原会话与 seq（审计可回溯）
+  assert.deepEqual(cand.sourceRef, { sessionEventId: 'child-session:16' })
+})
+
+test('非子代理会话不降权（opts.subagent 缺省）', () => {
+  const ev = { type: 'user/message', id: 'e10', content: '这个项目用 pnpm' }
+  const cand = toEvidenceCandidate(ev, { sessionId: 'root-session' })
+  assert.equal(cand.sourceClass, 'user_input')
+  assert.equal(cand.authority, 'user_explicit')
+  assert.equal(cand.claimDomain, 'user_fact')
 })

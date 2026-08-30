@@ -50,8 +50,21 @@ export function textOfInboxMessage(event) {
  */
 export function isEvidenceWorthy(event) {
   const type = event?.type ?? ''
-  if (type === 'agent/inbox/spliced') return !!textOfInboxMessage(event)
-  return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!extractText(event)
+  const text = extractText(event)
+  if (isSystemInjected(text)) return false
+  if (type === 'agent/inbox/spliced') return !!text
+  return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!text
+}
+
+/**
+ * 是否系统注入内容（system-reminder：AGENTS.md 等指令文件以 user 角色注入模型 context）。
+ * 这类内容是系统/项目指令的逐轮重复注入，不是用户输入；摄入会污染 ledger 并跨 session
+ * 扩散项目内部指令（2026-08-30 问题记录 F3）。
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isSystemInjected(text) {
+  return typeof text === 'string' && text.includes('<system-reminder>')
 }
 
 /**
@@ -66,37 +79,76 @@ export function extractText(event) {
 }
 
 /**
+ * 从事件提取消息来源 kind（agent/inbox/spliced 取 inserted[0].source.kind；
+ * 其余按事件类型前缀推断）。取不到 → ''（不可判定）。
+ * @param {object} event
+ * @returns {string}
+ */
+export function eventKindOf(event) {
+  const type = event?.type ?? ''
+  if (type === 'agent/inbox/spliced') {
+    return event?.data?.inserted?.[0]?.source?.kind ?? ''
+  }
+  if (type.startsWith('user/')) return 'user'
+  if (type.startsWith('tool/')) return 'tool'
+  if (type.startsWith('system/')) return 'system'
+  if (type.startsWith('assistant/')) return 'assistant'
+  return ''
+}
+
+/**
  * 从事件确定性推导 sourceClass。
+ *
+ * DSH harness 实际 source.kind 映射（2026-08-30 校准，见 ISSUES-INJECTION-ISOLATION.md §2.1）：
+ *   user              → user_input / user_correction（真实用户；子代理 prompt 派发也走
+ *                       kind='user'，由调用方用 opts.subagent 在候选层降权，见 toEvidenceCandidate）
+ *   tool              → external_tool
+ *   plugin / agent    → agent_authored
+ *   coordinator       → agent_authored（send_message 续派，tool-subagent-control）
+ *   subagent-settled  → agent_authored（子代理完成通知，subagent/continuation）
+ *   未知 kind         → agent_authored（保守：宁可不冒充用户，也不 fallback 到 user_input）
  * @param {object} event
  * @returns {'system'|'user_input'|'user_correction'|'external_tool'|'agent_authored'}
  */
 export function sourceClassOf(event) {
+  const kind = eventKindOf(event)
+  if (kind === 'user') return isCorrection(event) ? 'user_correction' : 'user_input'
+  if (kind === 'tool') return 'external_tool'
+  if (kind === 'plugin' || kind === 'agent'
+    || kind === 'coordinator' || kind === 'subagent-settled') return 'agent_authored'
   const type = event?.type ?? ''
-  if (type === 'agent/inbox/spliced') {
-    const kind = event?.data?.inserted?.[0]?.source?.kind
-    if (kind === 'user') return isCorrection(event) ? 'user_correction' : 'user_input'
-    if (kind === 'tool') return 'external_tool'
-    if (kind === 'plugin' || kind === 'agent') return 'agent_authored'
-    return 'user_input'
-  }
-  if (type.startsWith('user/')) {
-    return isCorrection(event) ? 'user_correction' : 'user_input'
-  }
-  if (type.startsWith('tool/')) return 'external_tool'
   if (type.startsWith('system/')) return 'system'
   return 'agent_authored'
 }
 
 /**
+ * 任务书特征前缀：父 agent 派发给子代理的完整任务书（含"不要改 X"等措辞，
+ * 会被纠正标记词误判为 user_correction——2026-08-30 问题记录 F2）。
+ * 保守判定：前缀命中且文本足够长（≥30 字符）才视为任务书；短句不受影响。
+ */
+const TASK_BRIEF_PREFIXES = ['你是', 'You are', '任务：', '项目：']
+const TASK_BRIEF_MIN_LEN = 30
+
+/**
  * 是否判定为明确纠正。
- * 规则：user 消息 + 包含纠正标记词 → user_correction。
- * （保守：宁可少判纠正，也不把普通陈述当纠正。）
+ * 规则：仅 user 来源消息 + 包含纠正标记词 → user_correction。
+ * 排除：非 user 来源（tool/coordinator/subagent-settled/plugin/agent 永不判纠正）；
+ *       任务书特征文本（父 agent 派发指令，非用户反馈）。
+ * （保守：宁可少判纠正，也不把普通陈述/任务书当纠正。）
  * @param {object} event
  * @returns {boolean}
  */
 export function isCorrection(event) {
   const text = extractText(event)
   if (!text) return false
+  // 仅 user 来源可判纠正
+  if (eventKindOf(event) !== 'user') return false
+  // 任务书负向排除（前缀 + 长度；短句不误伤）
+  if (text.length >= TASK_BRIEF_MIN_LEN) {
+    for (const p of TASK_BRIEF_PREFIXES) {
+      if (text.startsWith(p)) return false
+    }
+  }
   // 至少 2 个汉字 + 含标记词；单字"不/对"太宽松
   return CORRECTION_MARKERS.some((m) => text.includes(m)) && text.length >= 2
 }
@@ -144,6 +196,11 @@ export function claimDomainOf(event) {
  * @param {string} [opts.sessionId] - session id（真实事件用 sessionId:seq 作 sourceRef）
  * @param {string} [opts.agentKey]
  * @param {string} [opts.sessionType]
+ * @param {boolean} [opts.subagent] - 子代理会话降权（session.header.origin==='subagent'）：
+ *   kind='user' 的消息无法与真实用户区分（父 agent 派发 prompt 也走 kind='user'），
+ *   统一降权为 agent_authored/agent_inference/experience——记录但 quarantine
+ *   （agent_inference 在 readGuard 全 ✗，不进任何会话注入），
+ *   避免父任务书冒充用户指令（2026-08-30 问题记录 F4，决策 D2-A）。
  * @returns {object|null} Evidence candidate 或 null（不可摄入时）
  */
 export function toEvidenceCandidate(event, opts = {}) {
@@ -154,7 +211,7 @@ export function toEvidenceCandidate(event, opts = {}) {
   const eventRef = opts.sessionId && event.seq != null
     ? opts.sessionId + ':' + event.seq
     : (event.id ?? event.sessionEventId ?? String(event.seq ?? ''))
-  return {
+  const cand = {
     sourceClass: sc,
     authority: authorityOf(event),
     claimDomain: claimDomainOf(event),
@@ -169,4 +226,13 @@ export function toEvidenceCandidate(event, opts = {}) {
     sessionType: opts.sessionType ?? 'root',
     observedAt: new Date().toISOString(),
   }
+  // 子代理会话降权：user 消息（含父 prompt）→ agent_inference（记录但 quarantine）
+  if (opts.subagent && (sc === 'user_input' || sc === 'user_correction')) {
+    cand.sourceClass = 'agent_authored'
+    cand.authority = 'agent_inference'
+    cand.claimDomain = 'experience'
+    cand.confidence = 0.5
+    cand.durability = 0.5
+  }
+  return cand
 }
