@@ -177,7 +177,33 @@ export function viewRowToCandidate(r, fallbackScopeId) {
   }
 }
 
+/** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
+export const SETTINGS_NAMESPACE = 'adaptive-context'
+
+/**
+ * settings 文档值合并进启动配置（settings 优先，缺失回退 Config 默认）。
+ * 生效语义：设置页保存 → settings.yaml → 下次启动 apply 时覆盖（重启生效）。
+ * @param {object} ctx - cordis context（settings 服务可能未注册）
+ * @param {object} config - cordis Config（cordis.patch.yml）
+ * @returns {object} 合并后的配置
+ */
+export function mergeSettingsIntoConfig(ctx, config) {
+  let section = null
+  try {
+    const settings = ctx.get('settings')
+    section = settings?.get?.(SETTINGS_NAMESPACE) ?? null
+  } catch { /* settings 服务缺失 → 用 Config */ }
+  if (!section || typeof section !== 'object') return { ...config }
+  const merged = { ...config }
+  for (const [key, value] of Object.entries(section)) {
+    if (value !== undefined && value !== null) merged[key] = value
+  }
+  return merged
+}
+
 export function apply(ctx, config = {}) {
+  // 设置页（settings.yaml）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
+  config = mergeSettingsIntoConfig(ctx, config)
   // ledgerDir 兜底解析（与 openEvidenceLedger 同款：DSH_HOME 环境变量不可靠，配置优先）
   const ledgerDir = config.ledgerDir ?? path.join(process.env.DSH_HOME || '', 'acp')
   const ledger = openEvidenceLedger({ dir: ledgerDir })
@@ -198,6 +224,25 @@ export function apply(ctx, config = {}) {
     auditStore: ledger.auditStore,
     views,
     scopeId: scopeOf(ctx),
+  })
+
+  // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
+  // 字段与 Config 同源但独立 schema：设置页写 settings.yaml，apply 时 mergeSettingsIntoConfig 覆盖。
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
+      ledgerDir: z.string(),
+      hotTokens: z.number().step(1).min(1),
+      recallLimit: z.number().step(1).min(1),
+      targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
+      crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
+      subagentDowngrade: z.boolean(),
+      memosEnabled: z.boolean(),
+      memosBaseUrl: z.string(),
+      consolidationProvider: z.string(),
+      consolidationModel: z.string(),
+      autoPromote: z.boolean(),
+      debug: z.boolean(),
+    }))
   })
 
   // --- Service Definition：注册 ctx.acp ---

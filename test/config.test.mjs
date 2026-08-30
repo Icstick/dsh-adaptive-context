@@ -51,4 +51,34 @@ test('plugin config: absent recallProviders/llmTasks stay absent (backward compa
   assert.equal('recallProviders' in result.value, false)
   assert.equal('llmTasks' in result.value, false)
 })
+test('mergeSettingsIntoConfig：settings 文档覆盖 Config（仅提供已配置字段）', async () => {
+  const { mergeSettingsIntoConfig } = await import('../src/index.mjs')
+  const ctx = { get: () => ({ get: () => ({ hotTokens: 500, crossSessionPolicy: 'all' }) }) }
+  const merged = mergeSettingsIntoConfig(ctx, { hotTokens: 300, recallLimit: 20, debug: false })
+  assert.equal(merged.hotTokens, 500)
+  assert.equal(merged.crossSessionPolicy, 'all')
+  assert.equal(merged.recallLimit, 20) // settings 未提供 → Config 保留
+  assert.equal(merged.debug, false)
+})
+
+test('mergeSettingsIntoConfig：settings 服务缺失/无 namespace → 原样返回 Config', async () => {
+  const { mergeSettingsIntoConfig } = await import('../src/index.mjs')
+  const noService = { get: () => undefined }
+  const noSection = { get: () => ({ get: () => null }) }
+  const config = { hotTokens: 300, recallLimit: 20 }
+  assert.deepEqual(mergeSettingsIntoConfig(noService, config), config)
+  assert.deepEqual(mergeSettingsIntoConfig(noSection, config), config)
+  // 不修改原对象
+  assert.equal(Object.keys(config).length, 2)
+})
+
+test('mergeSettingsIntoConfig：settings 值为 null/undefined 时不覆盖', async () => {
+  const { mergeSettingsIntoConfig } = await import('../src/index.mjs')
+  const ctx = { get: () => ({ get: () => ({ hotTokens: null, debug: undefined, recallLimit: 50 }) }) }
+  const merged = mergeSettingsIntoConfig(ctx, { hotTokens: 300, recallLimit: 20, debug: true })
+  assert.equal(merged.hotTokens, 300)
+  assert.equal(merged.debug, true)
+  assert.equal(merged.recallLimit, 50)
+})
+
 

@@ -101,6 +101,18 @@ pnpm install
 
 > 注意：cordis.patch.yml 里**同一个 id 的多个条目，后者整体覆盖前者**（不是合并）——adaptive-context 只写一块。
 
+## 设置页配置卡片（v0.1.1+）
+
+- 位置：DSH Web **设置 → 插件 → 插件配置**（`adaptive-context` 卡片）
+- 机制：host 侧注册 settings namespace（`adaptive-context`），client bundle（`lib/client.js`，
+  由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
+- 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config，未配置字段回退 Config/默认值）
+- 字段：ledgerDir / hotTokens / recallLimit / targetDomain / crossSessionPolicy /
+  subagentDowngrade / memosEnabled / memosBaseUrl / consolidationProvider /
+  consolidationModel / autoPromote / debug
+- client 依赖：react（DSH 预加载）+ @deepseek-ai/dsh-client-ui-slots +
+  @deepseek-ai/dsh-client-ui-settings（client module table 提供，无需安装到项目依赖）
+
 ## 配置（全部字段）
 
 | 字段 | 类型 | 默认 | 说明 |
