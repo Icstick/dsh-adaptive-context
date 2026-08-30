@@ -26,7 +26,7 @@ test('built client plugin activates with its declared Cordis services', async (t
   assert.ok(registration)
   const plugin = registration.factory((specifier) => {
     assert.equal(specifier, 'react')
-    return { h() {}, useState() {}, useSyncExternalStore() {} }
+    return { createElement() {}, useState() {}, useSyncExternalStore() {} }
   })
 
   const negativeCtx = new Context()

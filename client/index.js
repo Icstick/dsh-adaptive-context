@@ -6,7 +6,8 @@
 // 自包含：不依赖 ui-settings-plugins 私有表单，字段渲染 + staged 草稿 + 保存自实现。
 // 文案写死中文（v1 不做 i18n）。
 
-const { h, useState, useSyncExternalStore } = require('react')
+// React 无顶层 h（那是 preact 的 API）——createElement 起别名 h 供组件使用
+const { createElement: h, useState, useSyncExternalStore } = require('react')
 
 /** 设置页 namespace（与 host 侧 SETTINGS_NAMESPACE 一致） */
 const NS = 'adaptive-context'
