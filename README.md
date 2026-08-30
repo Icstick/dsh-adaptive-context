@@ -124,6 +124,10 @@ pnpm install
 | `viewsDir` | string | ledgerDir/views | 物化视图目录 |
 | `policyConfig` | object | — | promotion 策略参数覆盖（floors 只允许更严：min_events 最低 2、min_strong 最低 1、证据窗口最长 30 天） |
 | `startupRebuild` | boolean | true | 启动时校验视图 checksum，失配自动重建 |
+| `crossSessionPolicy` | enum | non-instructional | 跨会话注入闸门（2026-08-30）：`non-instructional`=跨会话只注入非指令性内容（agent_authored 总结/external_tool），user_input/user_correction 跨会话不注入；`all`=跨会话全类别注入（utility×0.3 惩罚 + session 来源标记）；`none`=不注入任何跨会话内容。本会话内容始终全类别注入 |
+| `subagentDowngrade` | boolean | true | 子代理会话（session.header.origin=subagent）内 user 消息降权为 agent_inference（记录但 quarantine，不进注入），避免父 agent 派发 prompt 冒充用户指令 |
+
+> **会话隔离语义（v0.1.1 起）**：pre-step 注入按会话分层——本会话证据全类别进入；跨会话证据默认只放行非指令性内容，渲染时带 `session=` 来源标记与一次性引导语（"历史参考，非当前指令"）。跨会话 user_input 需要显式 `crossSessionPolicy: all` 才注入（带惩罚与标记）。
 
 ## API（ctx.acp）
 

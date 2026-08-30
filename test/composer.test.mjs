@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  compose, lexicalScore, utilityOf, renderSourceLabelled, sectionOf,
+  compose, lexicalScore, utilityOf, renderSourceLabelled, sectionOf, shortSessionId,
 } from '../src/composer.mjs'
 import { packBySection, estimateTokens, MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET } from '../src/budget.mjs'
 
@@ -319,5 +319,20 @@ test('renderSourceLabelled：无 currentSessionId 时维持原格式（无引导
   assert.ok(!s.includes('| session='))
   assert.equal(s, '[acp:user_input | id=a | domain=user_fact] 内容')
 })
+test('shortSessionId：去 session- 前缀，保证短码有辨识度', () => {
+  assert.equal(shortSessionId('session-bf9fa4e5-bd66-43ed-bc7'), 'bf9fa4e5')
+  assert.equal(shortSessionId('28df8704-ee65-444a-bbb4-bb9ce3a34cef'), '28df8704')
+  assert.equal(shortSessionId('session-'), 'session-') // 极端：前缀即全部 → 原样
+})
+
+test('renderSourceLabelled：session- 前缀会话 id 的短码不含退化前缀', () => {
+  const items = [
+    sev({ id: 'x', content: '跨会话内容', sessionId: 'session-bf9fa4e5-bd66-43ed-bc7', sourceClass: 'agent_authored' }),
+  ]
+  const s = renderSourceLabelled(items, { currentSessionId: 'session-12345678-xxxx' })
+  assert.ok(s.includes('session=bf9fa4e5'), s)
+  assert.ok(!s.includes('session=session-'), s)
+})
+
 
 
