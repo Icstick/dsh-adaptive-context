@@ -85,6 +85,18 @@ export const CONSOLIDATION_MIN_TURNS = 5
 export const CONSOLIDATION_META_WATERMARK_TS = 'consolidation_watermark_ts'
 export const CONSOLIDATION_META_TURN_COUNT = 'consolidation_turn_count'
 
+/** Consolidation 批次与频率上限（P0-4，2026-09-02）。
+ *  背景：批次原为「全部未消化 active 证据」且 prompt 全文 JSON 化，无上限 →
+ *  多子代理高频 turn/end 时是唯一的成本放大面（denial-of-wallet）。 */
+export const CONSOLIDATION_MAX_BATCH = 40
+export const CONSOLIDATION_MAX_CONTENT_CHARS = 800
+export const CONSOLIDATION_MAX_RUNS_PER_DAY = 24
+/** 失败留痕与日频计数（P0-1/P0-4） */
+export const CONSOLIDATION_META_FAIL_COUNT = 'consolidation_fail_count'
+export const CONSOLIDATION_META_LAST_FAILURE = 'consolidation_last_failure'
+export const CONSOLIDATION_META_RUN_DAY = 'consolidation_run_day'
+export const CONSOLIDATION_META_RUN_COUNT = 'consolidation_run_count'
+
 /** 错误码 */
 export const ERROR_CODES = Object.freeze({
   INVALID_INPUT: 'INVALID_INPUT',

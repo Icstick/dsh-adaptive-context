@@ -74,8 +74,13 @@ test('renderSourceLabelled：带来源标签', () => {
   assert.ok(s.includes('用 pnpm'))
 })
 
-test('estimateTokens 中文估算', () => {
-  assert.equal(estimateTokens('你好世界'), Math.ceil(4 * 0.7))
+test('estimateTokens 中英分算（2026-09-02：旧 0.7 系数对中文低估 30-40%）', () => {
+  // CJK 1.0 token/字：4 个汉字 = 4 token（旧实现给 3，注入预算长期账实不符）
+  assert.equal(estimateTokens('你好世界'), 4)
+  // 非 CJK 0.3 token/字：20 个 ASCII ≈ 6 token
+  assert.equal(estimateTokens('abcdefghijklmnopqrst'), 6)
+  // 混合：中文按 1.0 + 英文按 0.3
+  assert.equal(estimateTokens('你好abcde'), Math.ceil(2 * 1 + 5 * 0.3))
 })
 
 // ===== T1 self-echo 过滤（验收 oracle）=====

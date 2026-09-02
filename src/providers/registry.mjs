@@ -22,9 +22,10 @@ import { isValidRecallCandidate } from './recall-contract.mjs'
 
 /** 内置 provider 工厂（id → factory）。M3 MVP 只有 memos；v0.2 扩展 Reflect/Profile 等。 */
 const DEFAULT_FACTORIES = Object.freeze({
-  memos: (desc) => createMemosProvider({
+  memos: (desc, hooks = {}) => createMemosProvider({
     baseUrl: desc.baseUrl,
     timeoutMs: desc.timeoutMs,
+    onError: hooks.onError, // P0-2：失败上报给 registry 做健康跟踪（provider 仍 fail-open）
   }),
 })
 
@@ -40,9 +41,41 @@ const DEFAULT_FACTORIES = Object.freeze({
  *   recallAll: ({text, limit}) => Promise<object[]>,
  * }}
  */
-export function createProviderRegistry({ recallProviders, defaults = {}, factories = {} } = {}) {
+export function createProviderRegistry({ recallProviders, defaults = {}, factories = {}, logger = console } = {}) {
   const allFactories = { ...DEFAULT_FACTORIES, ...factories }
   const instances = new Map()
+  // P0-2（2026-09-02）：provider 召回健康状态。
+  // 旧实现失败完全静默返回 []，而调用方的 hasProvider 只看描述符 → composer 仍走
+  // 「有语义 provider」的权重分支，语义召回实际为空却按有结果配权：**检索质量系统性下降且不可见**。
+  const health = new Map() // id → { ok, error, at, consecutiveFailures }
+
+  function recordSuccess(id) {
+    health.set(id, { ok: true, error: null, at: new Date().toISOString(), consecutiveFailures: 0 })
+  }
+  function recordFailure(id, err) {
+    const prev = health.get(id)
+    const n = (prev?.consecutiveFailures ?? 0) + 1
+    health.set(id, { ok: false, error: String(err?.message ?? err ?? 'unknown'), at: new Date().toISOString(), consecutiveFailures: n })
+    logger?.warn?.('[acp] acp:degraded provider_recall_failed id=' + id
+      + ' consecutive=' + n + ' reason=' + String(err?.message ?? err ?? 'unknown'))
+  }
+
+  /** 本轮/最近一次召回的 provider 健康快照（供 hasProvider 判定与 doctor 用） */
+  function getHealth() {
+    const out = {}
+    for (const [id, h] of health) out[id] = { ...h }
+    return out
+  }
+
+  /** 是否存在「已启用且最近一次召回没有失败」的 provider（未召回过视为可用） */
+  function hasHealthyProvider() {
+    const enabled = resolveDescriptors().filter((d) => d.enabled && canBuild(d))
+    if (enabled.length === 0) return false
+    return enabled.some((d) => {
+      const h = health.get(d.id)
+      return !h || h.ok === true
+    })
+  }
 
   /** 描述符 → 规范化副本（缺省字段补齐） */
   function normalizeDescriptor(desc) {
@@ -90,7 +123,8 @@ export function createProviderRegistry({ recallProviders, defaults = {}, factori
     if (!instances.has(desc.id)) {
       const factory = typeof desc.create === 'function' ? desc.create : allFactories[desc.id]
       if (typeof factory !== 'function') return null
-      instances.set(desc.id, factory(desc))
+      // P0-2：第二参数是 hooks（onError）——自定义 create 忽略它不受影响
+      instances.set(desc.id, factory(desc, { onError: (err) => recordFailure(desc.id, err) }))
     }
     return instances.get(desc.id)
   }
@@ -109,12 +143,17 @@ export function createProviderRegistry({ recallProviders, defaults = {}, factori
           controller.signal.addEventListener('abort', () => reject(new Error('acp recall timed out: ' + desc.id)), { once: true })
         }),
       ])
-      if (!Array.isArray(hits)) return []
+      if (!Array.isArray(hits)) {
+        recordFailure(desc.id, 'provider returned non-array')
+        return []
+      }
+      recordSuccess(desc.id)
       return hits
         .map((h) => (h !== null && typeof h === 'object' ? { ...h, sourceProvider: desc.id } : h))
         .filter(isValidRecallCandidate)
-    } catch {
-      return [] // fail-open：单 provider 故障/超时不阻断其余
+    } catch (err) {
+      recordFailure(desc.id, err) // fail-open：单 provider 故障/超时不阻断其余，但**必须留痕**
+      return []
     } finally {
       clearTimeout(timer)
     }
@@ -144,5 +183,5 @@ export function createProviderRegistry({ recallProviders, defaults = {}, factori
     return results.flat()
   }
 
-  return { listRecallProviders, recallAll }
+  return { listRecallProviders, recallAll, getHealth, hasHealthyProvider }
 }

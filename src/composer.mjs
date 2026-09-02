@@ -21,7 +21,10 @@
 
 import { hashHex } from './constants.mjs'
 import { readGuard } from './governance.mjs'
-import { packBySection, estimateTokens, MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET, ComposeTelemetry } from './budget.mjs'
+import {
+  packBySection, estimateTokens, truncateToTokens, LINE_LABEL_TOKENS,
+  MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET, ComposeTelemetry,
+} from './budget.mjs'
 
 // —— 权重（COMPOSER.md §4）——
 export const WEIGHTS = Object.freeze({
@@ -257,8 +260,22 @@ export function compose(rawCandidates, opts = {}) {
       providerMax,
     })
     const section = sectionOf(cand)
-    const tokens = estimateTokens(cand.content)
-    return { ...cand, utility, section, tokens }
+    const quotaTable = opts.quota ?? MVP_SECTION_QUOTA
+    const raw = String(cand.content ?? '')
+    // 决策 2（2026-09-02）：单条最多占本 section 配额的 60%，超出则**截断 + 标注可回溯 id**，
+    // 而不是像旧实现那样整条丢弃（账本里 53.8% 的证据因此永远进不了注入面）。
+    const sectionCap = Number.isFinite(quotaTable[section]) ? quotaTable[section] : 300
+    const maxBody = Math.max(40, Math.floor(sectionCap * 0.6) - LINE_LABEL_TOKENS)
+    let content = raw
+    let truncated = false
+    if (estimateTokens(raw) > maxBody) {
+      content = truncateToTokens(raw, Math.max(20, maxBody - 14)) + '…〔截断，全文见 ' + cand.id + '〕'
+      truncated = true
+    }
+    // contentHash 固定按原文算：截断不应破坏跨候选的重复内容去重
+    const contentHash = cand.contentHash ?? hashHex(raw)
+    const tokens = estimateTokens(content) + LINE_LABEL_TOKENS
+    return { ...cand, content, contentHash, truncated, utility, section, tokens }
   })
 
   // —— Self-echo 过滤（T1）：当前用户消息（opts.query）不应被自己注回 ——
@@ -312,7 +329,8 @@ export function compose(rawCandidates, opts = {}) {
   }
 
   // —— Token Packing：section quota + 总预算 ——
-  const packed = packBySection(deduped, opts.quota ?? MVP_SECTION_QUOTA)
+  // P0-5：总预算真正生效（opts.maxTokens ← config.hotTokens，缺省 MVP_TOTAL_BUDGET）
+  const packed = packBySection(deduped, opts.quota ?? MVP_SECTION_QUOTA, opts.maxTokens ?? MVP_TOTAL_BUDGET)
   telemetry.dropped.push(...packed.dropped)
   telemetry.admitted = packed.items.length
   telemetry.sectionTokens = packed.sectionTokens

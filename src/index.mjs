@@ -33,7 +33,13 @@ export const inject = ['llm']
 
 export const Config = z.object({
   ledgerDir: z.string(),
-  hotTokens: z.number().step(1).min(1).default(300),
+  // P0-5（2026-09-02）：默认对齐 MVP_TOTAL_BUDGET(900)。此前默认 300 但 composer 从不读取，
+  // 实际预算一直是 quota 合计 900；现在配置真的生效，默认值必须对齐否则等于悄悄砍掉 2/3 注入面。
+  hotTokens: z.number().step(1).min(1).default(900),
+  /** P1-1（2026-09-02）：observation 注入开关。**默认 false = 冻结**（用户 2026-09-02 决策：
+   *  先冻结、修好失败吞批止血，两个月内无消费场景则删表与 consolidate 模块）。
+   *  接线已就位，打开即用，无需改代码。 */
+  observationInjection: z.boolean().default(false),
   recallLimit: z.number().step(1).min(1).default(20),
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
   // 跨会话注入闸门（2026-08-30 决策 D1，ISSUES-INJECTION-ISOLATION.md F7）：
@@ -177,6 +183,39 @@ export function viewRowToCandidate(r, fallbackScopeId) {
   }
 }
 
+/**
+ * P1-1（2026-09-02）：Observation → composer 候选。
+ *
+ * 背景：observation 层（subject/predicate/text≤500 的浓缩认知）**写了从来没人读**——
+ * 4 个查询接口在生产代码零调用方，8 条 observation 从未进过注入。而"索引常驻、正文按需"
+ * 这套两段式注入需要的浓缩层，其实已经躺在库里。
+ *
+ * 权威定级：observation 是 LLM 从多条证据提炼的推断，按铁律「Learning does not imply promotion」，
+ * 一律记 single_observation + confidence 0.6，由 readGuard 的 authority→claimDomain 矩阵决定能进哪些域。
+ */
+export function observationToCandidate(o, fallbackScopeId) {
+  const subject = String(o.subject ?? '').trim()
+  const predicate = String(o.predicate ?? '').trim()
+  const text = String(o.text ?? '').trim()
+  const head = subject && predicate ? subject + ' ' + predicate + '：' : ''
+  return {
+    id: o.id,
+    content: head + text,
+    sourceClass: 'agent_authored',
+    claimDomain: o.claimDomain ?? 'experience',
+    authority: 'single_observation',
+    confidence: 0.6,
+    durability: 0.6,
+    sensitivity: 'private',
+    state: 'active',
+    scopeId: o.scopeId ?? fallbackScopeId,
+    observedAt: o.createdAt ?? o.observedAt,
+    sourceRef: { kind: 'observation', evidenceIds: o.evidenceIds ?? [] },
+    evidenceIds: o.evidenceIds ?? [],
+    isObservation: true,
+  }
+}
+
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
 export const SETTINGS_NAMESPACE = 'adaptive-context'
 
@@ -232,6 +271,7 @@ export function apply(ctx, config = {}) {
     settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
       ledgerDir: z.string(),
       hotTokens: z.number().step(1).min(1),
+      observationInjection: z.boolean(),
       recallLimit: z.number().step(1).min(1),
       targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
       crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
@@ -278,6 +318,7 @@ export function apply(ctx, config = {}) {
       memosBaseUrl: config.memosBaseUrl,
       memosEnabled: config.memosEnabled,
     },
+    logger: ctx.logger ?? console, // P0-2：降级留痕走宿主 logger
   })
 
   // M3 A2：LLM 任务路由表——llmTasks 显式配置优先；consolidation 任务缺省从
@@ -403,27 +444,50 @@ export function apply(ctx, config = {}) {
             .map((r) => viewRowToCandidate(r, scopeId))
         : []
 
+      // —— P1-1：Observation 注入（默认冻结，config.observationInjection 打开）——
+      let observationCandidates = []
+      if (config.observationInjection === true) {
+        try {
+          const rows = typeof ledger.listObservations === 'function' ? ledger.listObservations(scopeId) : []
+          observationCandidates = rows
+            .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
+            .map((o) => observationToCandidate(o, scopeId))
+        } catch (err) {
+          ctx.logger?.warn?.('[acp] acp:degraded observation_read_failed reason='
+            + (err instanceof Error ? err.message : String(err)))
+        }
+      }
+
       // —— Provider recall（M3 A1）：registry 并行召回，semantic 分来源（COMPOSER.md §4）——
       // hasProvider = registry 有启用 provider（provider 自适应权重切换）；
       // recallAll 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
       const enabledProviders = registry.listRecallProviders()
-      const hasProvider = enabledProviders.length > 0
+      let hasProvider = enabledProviders.length > 0
       let recallCandidates = []
       if (hasProvider) {
         const hits = await registry.recallAll({ text: userText, limit: config.recallLimit ?? 20 })
         recallCandidates = normalizeRecallHits(hits, scopeId)
+        // P0-2（2026-09-02）：区分「未配置 provider」与「provider 调用失败」。
+        // 全部启用 provider 本轮都失败 → 降级为无 provider 权重分支（semantic 并入 lexical），
+        // 否则 composer 会按「有语义结果」配权，而实际召回是空的。
+        if (typeof registry.hasHealthyProvider === 'function' && !registry.hasHealthyProvider()) {
+          hasProvider = false
+          ctx.logger?.warn?.('[acp] acp:degraded provider_all_failed → compose 走无 provider 权重分支')
+        }
       }
       // M3 A3：多源融合权重（缺省 1.0）
       const providerWeights = {}
       for (const p of enabledProviders) providerWeights[p.id] = p.weight ?? 1
 
-      const result = compose([...ledgerCandidates, ...viewCandidates, ...recallCandidates], {
+      const result = compose([...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
         targetDomain: config.targetDomain ?? 'work',
         hasProvider,
         providerWeights,
-        maxTokens: config.hotTokens ?? 300,
+        // P0-5：hotTokens 现在真的生效（此前 composer 从不读取 = 死配置）。
+        // 默认对齐 MVP_TOTAL_BUDGET(900)，行为不变；要放宽注入窗口就调这个值。
+        maxTokens: config.hotTokens ?? 900,
         currentSessionId: sessionId,
         crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
       })

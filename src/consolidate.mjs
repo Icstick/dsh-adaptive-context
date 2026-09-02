@@ -14,6 +14,13 @@ import {
   CONSOLIDATION_MIN_TURNS,
   CONSOLIDATION_META_WATERMARK_TS,
   CONSOLIDATION_META_TURN_COUNT,
+  CONSOLIDATION_MAX_BATCH,
+  CONSOLIDATION_MAX_CONTENT_CHARS,
+  CONSOLIDATION_MAX_RUNS_PER_DAY,
+  CONSOLIDATION_META_FAIL_COUNT,
+  CONSOLIDATION_META_LAST_FAILURE,
+  CONSOLIDATION_META_RUN_DAY,
+  CONSOLIDATION_META_RUN_COUNT,
   MAX_OBSERVATION_SUBJECT_CHARS,
   MAX_OBSERVATION_TEXT_CHARS,
 } from './constants.mjs'
@@ -96,7 +103,7 @@ export function parseObservations(text) {
  * @param {object[]} evidences - { id, claimDomain, content }
  * @returns {{system: string, userText: string}}
  */
-export function buildConsolidationPrompt(evidences) {
+export function buildConsolidationPrompt(evidences, maxContentChars = CONSOLIDATION_MAX_CONTENT_CHARS) {
   const system = [
     'You consolidate evidence records into durable observations for a user-context ledger.',
     'Return ONLY one JSON object with exactly this shape:',
@@ -106,27 +113,44 @@ export function buildConsolidationPrompt(evidences) {
     'subject is a short noun phrase; predicate is a short relation verb; text is a concise fact (<= 500 chars); evidenceIds reference the supporting evidence ids.',
     'Do not invent facts absent from the evidence. Do not output anything except the JSON.',
   ].join('\n')
+  // P0-4：单条正文截断（默认 800 字符），避免长证据把 prompt 撑爆。
+  // 截断保留可回溯性——observation 里带 evidenceIds，需要全文时按 id 回查。
+  const cap = Number.isFinite(maxContentChars) && maxContentChars > 0
+    ? maxContentChars
+    : CONSOLIDATION_MAX_CONTENT_CHARS
   const userText = 'Evidence records (JSON):\n'
-    + JSON.stringify(evidences.map((ev) => ({ id: ev.id, claimDomain: ev.claimDomain, content: ev.content })))
+    + JSON.stringify(evidences.map((ev) => {
+      const raw = String(ev.content ?? '')
+      const content = raw.length > cap ? raw.slice(0, cap) + '…[truncated ' + raw.length + ' chars]' : raw
+      return { id: ev.id, claimDomain: ev.claimDomain, content }
+    }))
   return { system, userText }
 }
 
-/** 最多 2 次 LLM 尝试（初次 + 1 次重试）；抛错或解析失败都计一次，仍失败丢弃该批返回 [] */
-async function deriveViaLlm(evidences, llmCall, logger) {
-  const { system, userText } = buildConsolidationPrompt(evidences)
+/**
+ * 最多 2 次 LLM 尝试（初次 + 1 次重试）。
+ * P0-1（2026-09-02）：返回 { ok, observations, error }——**失败必须与「成功但产出 0 条」区分**。
+ * 旧实现两种情况都返回 []，调用方无条件推进水位，导致失败批被永久标记已消化、永不重试
+ * （实例实证：2026-09-01 一次 run 处理 209 条证据、产出 0 条，水位照常推进 → 209 条永久跳过）。
+ */
+async function deriveViaLlm(evidences, llmCall, logger, maxContentChars) {
+  const { system, userText } = buildConsolidationPrompt(evidences, maxContentChars)
+  let lastError = 'unknown'
   for (let attempt = 0; attempt < 2; attempt++) {
     let text
     try {
       text = await llmCall(userText, system)
     } catch (err) {
+      lastError = 'llm_call_failed: ' + (err && err.message)
       logger?.warn?.('[acp] consolidation llm call failed (attempt ' + (attempt + 1) + '/2): ' + (err && err.message))
       continue
     }
     const parsed = parseObservations(text)
-    if (parsed.ok) return parsed.observations
+    if (parsed.ok) return { ok: true, observations: parsed.observations }
+    lastError = 'parse_failed'
     logger?.warn?.('[acp] consolidation llm output parse failed (attempt ' + (attempt + 1) + '/2)')
   }
-  return [] // 丢弃该批（不落规则兜底——规则兜底只在 llmCall 缺失时启用）
+  return { ok: false, observations: [], error: lastError }
 }
 
 // ===================== M3 B3：style 候选 → policy（guarded auto promotion） =====================
@@ -240,6 +264,10 @@ export function createConsolidator(opts = {}) {
     llmCall = null,
     minEvidence = CONSOLIDATION_MIN_EVIDENCE,
     minTurns = CONSOLIDATION_MIN_TURNS,
+    // P0-4（2026-09-02）：批次/正文/日频三重上限，关掉唯一的成本放大面
+    maxBatch = CONSOLIDATION_MAX_BATCH,
+    maxContentChars = CONSOLIDATION_MAX_CONTENT_CHARS,
+    maxRunsPerDay = CONSOLIDATION_MAX_RUNS_PER_DAY,
     logger = console,
     // M3 B3：guarded auto promotion 依赖（index.mjs 装配；缺省 null = M2 行为）
     candidateStore = null,
@@ -266,19 +294,67 @@ export function createConsolidator(opts = {}) {
     return Number.isFinite(n) ? n : 0
   }
 
-  /** 未消化 = active 且 observedAt > 上次 consolidation 水位 */
+  /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续） */
   function undigestedEvidence() {
     const watermark = readMeta(CONSOLIDATION_META_WATERMARK_TS)
     const active = typeof ledger.listActive === 'function'
       ? ledger.listActive(scopeId)
       : ledger.query({ scopeId, state: 'active' }).items
-    if (!watermark) return active
-    return active.filter((ev) => (ev.observedAt ?? '') > watermark)
+    const pendingRows = watermark
+      ? active.filter((ev) => (ev.observedAt ?? '') > watermark)
+      : [...active]
+    return pendingRows.sort((a, b) => String(a.observedAt ?? '').localeCompare(String(b.observedAt ?? '')))
+  }
+
+  /** P0-4：本次实际送进 LLM 的批（最早的 maxBatch 条）；剩余留给下一轮 */
+  function nextBatch() {
+    const all = undigestedEvidence()
+    const cap = Number.isFinite(maxBatch) && maxBatch > 0 ? maxBatch : all.length
+    return all.length > cap ? all.slice(0, cap) : all
   }
 
   /** 节流判定：未消化 ≥ minEvidence 或 距上次 ≥ minTurns turn */
   function shouldRun() {
     return undigestedEvidence().length >= minEvidence || readTurnCount() >= minTurns
+  }
+
+  /** P0-4：日频上限（UTC 日切）。超限直接跳过，不消耗 LLM。 */
+  function dailyRunsExceeded() {
+    if (!Number.isFinite(maxRunsPerDay) || maxRunsPerDay <= 0) return false
+    const today = new Date().toISOString().slice(0, 10)
+    if (readMeta(CONSOLIDATION_META_RUN_DAY) !== today) return false
+    const n = Number(readMeta(CONSOLIDATION_META_RUN_COUNT) ?? 0)
+    return Number.isFinite(n) && n >= maxRunsPerDay
+  }
+
+  function recordRun() {
+    const today = new Date().toISOString().slice(0, 10)
+    const sameDay = readMeta(CONSOLIDATION_META_RUN_DAY) === today
+    const n = sameDay ? Number(readMeta(CONSOLIDATION_META_RUN_COUNT) ?? 0) : 0
+    writeMeta(CONSOLIDATION_META_RUN_DAY, today)
+    writeMeta(CONSOLIDATION_META_RUN_COUNT, String((Number.isFinite(n) ? n : 0) + 1))
+  }
+
+  /** P0-1：失败留痕——meta 计数 + 可 grep 日志 + audit（op=consolidate, actor=consolidation） */
+  function recordFailure(batchSize, error) {
+    const n = Number(readMeta(CONSOLIDATION_META_FAIL_COUNT) ?? 0)
+    writeMeta(CONSOLIDATION_META_FAIL_COUNT, String((Number.isFinite(n) ? n : 0) + 1))
+    writeMeta(CONSOLIDATION_META_LAST_FAILURE, JSON.stringify({
+      at: new Date().toISOString(), batchSize, error: String(error ?? 'unknown'),
+    }))
+    logger?.warn?.('[acp] acp:degraded consolidation_failed batch=' + batchSize
+      + ' reason=' + String(error ?? 'unknown') + ' watermark_kept=true')
+    try {
+      auditStore?.appendAudit?.({
+        op: 'consolidate',
+        scopeId,
+        actor: 'consolidation',
+        reason: 'consolidation failed; watermark not advanced',
+        payload: { batchSize, error: String(error ?? 'unknown') },
+      })
+    } catch (err) {
+      logger?.warn?.('[acp] consolidation failure audit write error: ' + (err && err.message))
+    }
   }
 
   function advanceWatermark(evidences) {
@@ -306,16 +382,27 @@ export function createConsolidator(opts = {}) {
     if (running) return { ran: false, reason: 'running', digested: 0, observations: 0 }
     running = true
     try {
-      const evidences = undigestedEvidence()
+      if (dailyRunsExceeded()) {
+        logger?.warn?.('[acp] acp:degraded consolidation_skipped reason=daily_cap max=' + maxRunsPerDay)
+        return { ran: false, reason: 'daily_cap', digested: 0, observations: 0 }
+      }
+      const evidences = nextBatch()
       resetTurns() // 已消费本次触发的 turn 计数
       if (evidences.length === 0) {
         advanceWatermark([])
         return { ran: true, digested: 0, observations: 0 }
       }
+      recordRun()
 
       let observations
       if (currentLlmCall) {
-        observations = await deriveViaLlm(evidences, currentLlmCall, logger)
+        const derived = await deriveViaLlm(evidences, currentLlmCall, logger, maxContentChars)
+        if (!derived.ok) {
+          // P0-1：LLM 失败 → **不推进水位**，这批留给下一轮重试；失败留痕可 grep。
+          recordFailure(evidences.length, derived.error)
+          return { ran: true, digested: 0, observations: 0, reason: 'llm_failed' }
+        }
+        observations = derived.observations
       } else {
         observations = ruleObservations(evidences)
       }

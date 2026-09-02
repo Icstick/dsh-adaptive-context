@@ -7,7 +7,7 @@ test('plugin config validates defaults through Standard Schema', async () => {
 
   assert.deepEqual(result, {
     value: {
-      hotTokens: 300,
+      hotTokens: 900, // 2026-09-02：对齐 MVP_TOTAL_BUDGET（此前 300 但 composer 从不读取＝死配置）
       recallLimit: 20,
       targetDomain: 'work',
       crossSessionPolicy: 'non-instructional',
@@ -17,6 +17,7 @@ test('plugin config validates defaults through Standard Schema', async () => {
       memosEnabled: true,
       startupRebuild: true,
       autoPromote: false,
+      observationInjection: false, // 2026-09-02：observation 注入已接线但默认冻结
     },
   })
 })

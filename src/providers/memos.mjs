@@ -21,12 +21,15 @@ export const MEMOS_DEFAULT_TIMEOUT_MS = 3000
  * @param {string} [opts.baseUrl] - MemOS Viewer 地址（默认 127.0.0.1:18801）
  * @param {number} [opts.timeoutMs] - 前台超时（默认 3000，DSH 上限）
  * @param {string} [opts.agent] - MemOS agent 命名空间（默认 'deepseek-harness'）
+ * @param {(err: unknown) => void} [opts.onError] - P0-2：失败上报回调（registry 注入，用于健康跟踪）；
+ *   provider 自身仍 fail-open 返回 []，回调只负责留痕
  * @returns {{ id: string, recall: (query, signal) => Promise<object[]> }}
  */
 export function createMemosProvider(opts = {}) {
   const baseUrl = opts.baseUrl ?? MEMOS_DEFAULT_BASE_URL
   const timeoutMs = Math.min(opts.timeoutMs ?? MEMOS_DEFAULT_TIMEOUT_MS, MEMOS_DEFAULT_TIMEOUT_MS)
   const agent = opts.agent ?? 'deepseek-harness'
+  const onError = typeof opts.onError === 'function' ? opts.onError : null
 
   return {
     id: 'memos',
@@ -53,7 +56,12 @@ export function createMemosProvider(opts = {}) {
           }),
           signal: controller.signal,
         })
-        if (!resp.ok) return []
+        // P0-2：HTTP 失败要上报（onError），但仍返回 [] 保持 provider 层 fail-open 契约。
+        // 旧实现只 return []，调用方无法区分「失败」与「召回到 0 条」。
+        if (!resp.ok) {
+          onError?.(new Error('memos recall http ' + resp.status))
+          return []
+        }
         const data = await resp.json()
         const hits = Array.isArray(data?.hits) ? data.hits : []
         return hits
@@ -66,8 +74,9 @@ export function createMemosProvider(opts = {}) {
             refKind: h.refKind,
           }))
           .filter(isValidRecallCandidate)
-      } catch {
-        return [] // fail-open：Provider 故障不阻断
+      } catch (err) {
+        onError?.(err) // P0-2：失败上报给 registry 记录健康；仍 fail-open 返回 []
+        return []
       } finally {
         clearTimeout(timer)
         signal?.removeEventListener('abort', onSignal)
