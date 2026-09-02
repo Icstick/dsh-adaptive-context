@@ -1,7 +1,7 @@
 {
   "name": "dsh-adaptive-context",
   "description": "Adaptive Context Plane core bundle: Evidence Ledger + Governance + Context Composer + User Model (explicit)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "./src/index.mjs",
   "types": "./src/types.d.ts",
