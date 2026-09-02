@@ -75,6 +75,7 @@ export const Config = z.object({
   consolidationModel: z.string(),
   consolidationMaxTokens: z.number().step(1).min(1),
   consolidationTimeoutMs: z.number().step(1).min(1),
+  consolidationMaxBatch: z.number().step(1).min(1), // P0-6：单批证据上限透传（默认 constants 40）
   // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
   autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
   viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
@@ -367,6 +368,7 @@ export function apply(ctx, config = {}) {
     llmCall: buildLlmCall(),
     minEvidence,
     minTurns,
+    maxBatch: config.consolidationMaxBatch, // P0-6：undefined → consolidate 默认 CONSOLIDATION_MAX_BATCH
     logger: ctx.logger,
     // M3 B3：guarded auto promotion——consolidation 产出 style 候选 → policy → autoPromote
     candidateStore: ledger.candidateStore,
