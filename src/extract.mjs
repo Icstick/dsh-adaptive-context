@@ -29,16 +29,29 @@ const CORRECTION_MARKERS = [
  * @param {object} event
  * @returns {string}
  */
+/** content 块数组 → 文本（type==='text' 块拼接；与 DSH 消息 content 形状同构） */
+export function blocksToText(blocks) {
+  if (!Array.isArray(blocks)) return ''
+  const parts = []
+  for (const block of blocks) {
+    if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return parts.join(' ').trim()
+}
+
+/**
+ * 从 agent/inbox/spliced 事件的 data.inserted[] 提取文本
+ * （真实 DSH 事件：inserted = [{ content: [{type:'text',text}], source:{kind}, role, id }]）。
+ * @param {object} event
+ * @returns {string}
+ */
 export function textOfInboxMessage(event) {
   const inserted = event?.data?.inserted
   if (!Array.isArray(inserted)) return ''
   const parts = []
   for (const msg of inserted) {
-    const content = msg?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
-    }
+    const t = blocksToText(msg?.content)
+    if (t) parts.push(t)
   }
   return parts.join(' ').trim()
 }
@@ -83,10 +96,34 @@ export function isSystemInjected(text) {
  * @param {object} event
  * @returns {string}
  */
+// P0-1（2026-09-03）：超长事件文本（如巨型 tool/result）入库前截断，保幂等（同一文本截断一致）
+const MAX_EVENT_TEXT_CHARS = 4000
+
+/**
+ * 从事件提取规范化文本（content）。
+ * 提取顺序：
+ *   1. 事件顶层 content/text/message.content（synthetic 测试形态，content 可为字符串或块数组）
+ *   2. agent/inbox/spliced → data.inserted[].content（用户/插件/协调者消息）
+ *   3. P0-1：真实事件的 data.message.content[]（assistant/message、tool/result、user/message
+ *      —— 真实文本全在 data 层，2026-09-03 校准；与 inbox inserted[].content 同构）
+ * @param {object} event
+ * @returns {string}
+ */
 export function extractText(event) {
   const direct = event?.content ?? event?.text ?? event?.message?.content
-  if (typeof direct === 'string' && direct.trim()) return direct.trim()
-  return textOfInboxMessage(event)
+  if (typeof direct === 'string' && direct.trim()) return direct.trim().slice(0, MAX_EVENT_TEXT_CHARS)
+  if (Array.isArray(direct)) {
+    const t = blocksToText(direct)
+    if (t) return t.slice(0, MAX_EVENT_TEXT_CHARS)
+  }
+  const inboxText = textOfInboxMessage(event)
+  if (inboxText) return inboxText.slice(0, MAX_EVENT_TEXT_CHARS)
+  const dm = event?.data?.message
+  if (dm && Array.isArray(dm.content)) {
+    const t = blocksToText(dm.content)
+    if (t) return t.slice(0, MAX_EVENT_TEXT_CHARS)
+  }
+  return ''
 }
 
 /**
