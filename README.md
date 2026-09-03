@@ -62,6 +62,11 @@ DSH 会话事件
 ```
 
 ## 安装
+> **GitHub 一键安装**：`dsh plugin --profile <name> add github:Icstick/dsh-adaptive-context`
+> （bundle patch 会自动挂载 adaptive-context 条目）。装完后仍需在 profile 的
+> cordis.patch.yml 给该条目补 `config.ledgerDir`（数据目录必须显式）并重启；
+> 完整三步与字段说明见下。
+
 
 在 dsh 的 profile 目录（比如 `~/.dsh/profiles/web/`）做三步：
 

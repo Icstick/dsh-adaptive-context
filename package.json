@@ -64,5 +64,15 @@
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Icstick/dsh-adaptive-context.git"
+  },
+  "homepage": "https://github.com/Icstick/dsh-adaptive-context",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis"
+  ]
 }
