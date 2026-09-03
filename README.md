@@ -61,6 +61,47 @@ DSH 会话事件
               └─ 候选状态机 → 物化视图（pre-step 注入时读取）
 ```
 
+## Agent 安装指南（面向自动化装配）
+
+> 给需要在本机 dsh 装配本插件的 agent/脚本读；人工安装见下一节。
+> 三条硬约束：① 数据目录必须显式配置；② pnpm install 前先停 dsh（Windows
+> native DLL 锁）；③ 同 id 的 patch 条目是整体覆盖，不要重复插。
+
+**1. 定位 profile**：`<DSH_HOME>/profiles/<profile>/`（例 `C:\Users\<you>\.dsh\profiles\web`）。
+先读该目录 `package.json`：若没有 `dsh.profile.bundles` 键，说明 profile 未初始化，
+先 `dsh plugin --profile <profile> list`（或人工建 package.json）再继续。
+
+**2. 添加依赖**（二选一）：
+
+```bash
+# A. GitHub 源（远端安装推荐）：CLI 自动把声明 dsh.bundle 的包加入 dsh.profile.bundles
+dsh plugin --profile <profile> add github:Icstick/dsh-adaptive-context
+# B. 本地开发：profile package.json dependencies 加 "dsh-adaptive-context": "link:<绝对路径>",
+#    并在同文件 dsh.profile.bundles 数组追加 "dsh-adaptive-context"
+```
+
+⚠️ `dsh plugin add` 只装依赖并 reconcile bundles，**不会写配置条目**——第 3 步必须做。
+
+**3. 写配置**：编辑 profile 根 `cordis.patch.yml`（无则新建）：
+
+```yaml
+- id: adaptive-context
+  name: dsh-adaptive-context
+  config:
+    ledgerDir: C:\path\to\acp-data   # 必填：账本目录绝对路径；DSH_HOME 环境变量不可靠
+    # 可选：consolidationProvider/Model——配了才有 LLM 沉淀，不配走规则兜底
+```
+
+**4. 安装并重启**：停 dsh → profile 目录 `pnpm install` → 重启 dsh。
+
+**5. 验证**：
+- 数据：`<ledgerDir>` 下出现 `acp-ledger.db` 与 `views/`
+- 生效：新会话 pre-step 注入出现 `[acp:...]` 前缀条目（如 `[acp:user_input | id=ev_...]`）
+
+**故障速查**：不注入/不沉淀 → 检查 ledgerDir 显式且可写；boot 报 duplicate loader
+entry → patch 里同 id 插了两遍；Web 设置无配置卡片 → 源码形态需先跑
+`node scripts/build-client.mjs` 生成 client bundle。
+
 ## 安装
 > **GitHub 一键安装**：`dsh plugin --profile <name> add github:Icstick/dsh-adaptive-context`
 > （bundle patch 会自动挂载 adaptive-context 条目）。装完后仍需在 profile 的
