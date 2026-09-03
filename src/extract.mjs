@@ -44,14 +44,25 @@ export function textOfInboxMessage(event) {
 }
 
 /**
- * 判断事件是否值得摄入为 Evidence。
- * @param {object} event - DSH session event
+ * 是否为压缩重建消息（compaction checkpoint）。
+ * 官方引擎压缩后 append 一条 user/message 摘要消息，事件顶层带
+ * surfaceOp={op:'replace',...} + sourceEventSeqs——这是系统重建产物，
+ * 不是用户输入（用户真实消息 surfaceOp='append' 或无该字段）。
+ * 原始被压内容在 append 实时流中已被摄取，跳过 checkpoint 不丢语义。
+ * （2026-09-03 防御：防「已压缩 N 条」这类消息冒充 user_fact 入 ledger。）
+ * @param {object} event
  * @returns {boolean}
  */
+export function isCompactionCheckpoint(event) {
+  const sop = event?.surfaceOp
+  return !!sop && typeof sop === 'object' && sop.op === 'replace'
+}
+
 export function isEvidenceWorthy(event) {
   const type = event?.type ?? ''
   const text = extractText(event)
   if (isSystemInjected(text)) return false
+  if (isCompactionCheckpoint(event)) return false // 压缩重建消息非用户输入（2026-09-03 防御）
   if (type === 'agent/inbox/spliced') return !!text
   return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!text
 }
@@ -89,6 +100,10 @@ export function eventKindOf(event) {
   if (type === 'agent/inbox/spliced') {
     return event?.data?.inserted?.[0]?.source?.kind ?? ''
   }
+  // 2026-09-03 防御：事件自带 source.kind 且非 'user' → 按该 kind 归类，
+  // 防插件/系统以 user 角色 append 的消息冒充真实用户（如压缩 checkpoint）。
+  const sourceKind = event?.data?.source?.kind ?? ''
+  if (sourceKind && sourceKind !== 'user') return sourceKind
   if (type.startsWith('user/')) return 'user'
   if (type.startsWith('tool/')) return 'tool'
   if (type.startsWith('system/')) return 'system'

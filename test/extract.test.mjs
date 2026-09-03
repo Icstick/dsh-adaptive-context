@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   isEvidenceWorthy, extractText, sourceClassOf, authorityOf,
   claimDomainOf, isCorrection, toEvidenceCandidate, isSystemInjected,
+  isCompactionCheckpoint,
 } from '../src/extract.mjs'
 import { evidenceIdOf } from '../src/constants.mjs'
 
@@ -208,4 +209,34 @@ test('非子代理会话不降权（opts.subagent 缺省）', () => {
   assert.equal(cand.sourceClass, 'user_input')
   assert.equal(cand.authority, 'user_explicit')
   assert.equal(cand.claimDomain, 'user_fact')
+})
+
+test('compaction checkpoint（user/message + surfaceOp replace）→ 不摄入', () => {
+  // 官方引擎压缩后重建的 checkpoint 消息（surfaceOp replace 顶层特征）
+  const checkpoint = {
+    type: 'user/message',
+    seq: 500,
+    content: '已压缩 761 条历史记录（约 372810 tokens）',
+    surfaceOp: { op: 'replace', start: 10, end: 480 },
+    sourceEventSeqs: [499, 500, 1, 2, 3],
+  }
+  assert.equal(isCompactionCheckpoint(checkpoint), true)
+  assert.equal(isEvidenceWorthy(checkpoint), false, '压缩重建消息不摄入——原始被压内容已实时摄入')
+  // 对照：真实用户消息 surfaceOp='append' 或缺失 → 正常摄入
+  assert.equal(isEvidenceWorthy({ type: 'user/message', content: '我们用 pnpm' }), true)
+  assert.equal(isEvidenceWorthy({ type: 'user/message', content: '继续', surfaceOp: 'append' }), true)
+})
+
+test('eventKindOf：事件自带 source.kind（非 user）不冒充 user_input', () => {
+  // 插件以 user 角色 append 但显式标注 source.kind='plugin' → agent_authored
+  const pluginMsg = {
+    type: 'user/message',
+    data: { source: { kind: 'plugin', plugin: 'some-plugin' } },
+    content: '插件注入的说明文本',
+  }
+  assert.equal(sourceClassOf(pluginMsg), 'agent_authored')
+  assert.equal(claimDomainOf(pluginMsg), 'experience')
+  // source.kind='user' 显式标注 → 仍判 user
+  const userMsg = { type: 'user/message', data: { source: { kind: 'user' } }, content: '真实用户消息' }
+  assert.equal(sourceClassOf(userMsg), 'user_input')
 })
