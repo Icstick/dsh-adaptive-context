@@ -16,6 +16,7 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { makeAcpQueryTool } from './tools.mjs'
 import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
 import { createLlmRouter } from './providers/llm-router.mjs'
@@ -29,7 +30,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
-export const inject = ['llm']
+export const inject = ['llm', 'tools']
 
 export const Config = z.object({
   ledgerDir: z.string(),
@@ -79,6 +80,9 @@ export const Config = z.object({
   // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
   autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
   viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
+  // S1 P2（2026-09-04）：section quota 覆盖（如 { user_model: 800 }）。
+  // 不配置 = composer 用 MVP_SECTION_QUOTA（user_model 180/…）；总预算仍由 hotTokens 控制。
+  sectionQuota: z.any(),
   policyConfig: z.any(),                   // 可选：policy 覆盖（minEvents/maxEvidenceAgeDays…；
                                            // floors 收口由 policy.mjs 保证，只允许更严）
 })
@@ -294,6 +298,18 @@ export function apply(ctx, config = {}) {
     requestPromotion: (candidate, ctxArg) => expression.requestPromotion(candidate, ctxArg ?? ctx),
   })
 
+  // --- S1 P1（2026-09-04）：acp_query 只读工具（对话即界面）---
+  // 注册失败不阻断插件（工具缺失仅失去主动查询面，注入不受影响）。
+  try {
+    ctx.tools.register(makeAcpQueryTool({
+      ledger,
+      auditStore: acp.auditStore || ledger.auditStore,
+      scopeId: scopeOf(ctx),
+    }))
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] acp_query register failed: ' + (err && err.message))
+  }
+
   // --- M3 C3：启动校验（views are rebuildable）---
   // verifyView 失配且 startupRebuild=true → 自动重建（含首启未构建视图的首次物化）；
   // 失败仅告警，绝不阻断插件启动。
@@ -490,6 +506,8 @@ export function apply(ctx, config = {}) {
         // P0-5：hotTokens 现在真的生效（此前 composer 从不读取 = 死配置）。
         // 默认对齐 MVP_TOTAL_BUDGET(900)，行为不变；要放宽注入窗口就调这个值。
         maxTokens: config.hotTokens ?? 900,
+        // S1 P2：section quota 覆盖（如 { user_model: 800 }）；缺省 MVP_SECTION_QUOTA。
+        quota: config.sectionQuota,
         currentSessionId: sessionId,
         crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
       })
