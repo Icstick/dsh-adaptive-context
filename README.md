@@ -1,5 +1,7 @@
 # dsh-adaptive-context
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+
 DeepSeek Harness (dsh) 的 **AdaptiveContextPlane (ACP)** 插件——带治理的长期记忆系统。
 
 > **设计铁律**
