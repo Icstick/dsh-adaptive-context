@@ -81,15 +81,15 @@ test('acp_query：service recall 路径（readGuard）', () => {
   assert.equal(r.evidence.length, 1)
 })
 
-test('makeAcpQueryTool：宿主形状 + handler + 读审计', async () => {
+test('buildAcpQueryToolSpec：rc.1 形状 + execute + 读审计', async () => {
   const { acp, ledger } = makeEnv()
   ledger.append({ ...BASE, authority: 'user_explicit', claimDomain: 'user_fact', content: '审计测试内容' })
   const tool = buildAcpQueryToolSpec({ ledger, auditStore: ledger.auditStore, scopeId: 'user-global' })
   assert.equal(tool.name, 'acp_query')
-  assert.ok(tool.schema && typeof tool.handler === 'function')
-  const res = await await_tool(tool, { query: '审计测试' })
-  assert.equal(res.result.ok, true)
-  assert.equal(res.result.evidence.length, 1)
+  assert.ok(tool.parameters && tool.output && typeof tool.execute === 'function')
+  const res = await tool.execute({ query: '审计测试' }, {})
+  assert.equal(res.ok, true)
+  assert.equal(res.evidence.length, 1)
   const audit = ledger.auditStore.queryAudit({ op: 'model_query' })
   assert.ok(Array.isArray(audit) ? audit.length >= 1 : true, 'audit 应记录')
 })
