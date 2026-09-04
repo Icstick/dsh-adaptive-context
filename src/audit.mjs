@@ -23,6 +23,7 @@ export const AUDIT_OPS = Object.freeze([
   'consolidate',
   'rebuild',
   'system',
+  'model_query', // S1 P1（2026-09-04）：acp_query 只读工具查询审计
 ])
 
 /** 审计行为者枚举 */
@@ -31,6 +32,7 @@ export const AUDIT_ACTORS = Object.freeze([
   'user',
   'system',
   'consolidation',
+  'model', // S1 P1（2026-09-04）：模型侧工具动作（如 acp_query 读审计）
 ])
 
 function assertChoice(value, allowed, label) {
