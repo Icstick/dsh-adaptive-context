@@ -596,6 +596,8 @@ export function apply(ctx, config = {}) {
       // source-labelled plugin message：untrusted historical context，
       // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
       const body = renderSourceLabelled(result.items, { currentSessionId: sessionId })
+      // S1 P7：注入实际发生（items 非空）→ 向调度器上报实际注入字符（fail-open）
+      reportInjectionToScheduler(ctx, sessionId, body)
       const ours = createUserMessage({
         content: [{ type: 'text', text: body }],
         source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },

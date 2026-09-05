@@ -124,3 +124,32 @@ test('S1 P7 reportInjectionToScheduler：recordUsage 故障（reject）→ 不�
   assert.doesNotThrow(() => reportInjectionToScheduler(ctx, 'session-1', '内容'))
   await new Promise((r) => setTimeout(r, 5))
 })
+
+
+// ── 接线守卫（2026-09-05 M5 装配教训）────────────────────────────────────────
+// 此前 patch 时"已插入"守卫被函数定义行（export function reportInjectionToScheduler(ctx,
+// sessionId, body)）误匹配，导致 pre-step 上报调用从未插入而测试全绿（模块级测试
+// 不覆盖接线点）。守卫 = 源码级断言：注入点（renderSourceLabelled 调用后）必须存在
+// 上报调用行。模块级行为测试 + 接线守卫双保险。
+
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+test('接线守卫：pre-step 注入点存在 reportInjectionToScheduler 调用（非定义行）', () => {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/index.mjs'), 'utf8')
+  const lines = src.split(/\r?\n/)
+  const bodyIdx = lines.findIndex((l) => l.includes('const body = renderSourceLabelled'))
+  assert.ok(bodyIdx >= 0, '注入点存在（renderSourceLabelled 调用）')
+  const after = lines.slice(bodyIdx, bodyIdx + 5)
+  assert.ok(
+    after.some((l) => l.trim() === 'reportInjectionToScheduler(ctx, sessionId, body)'),
+    '注入点后 5 行内必须有上报调用（定义行不算：trim 精确匹配无 function 前缀）',
+  )
+})
+
+test('接线守卫：apply 调用 registerAcpSection（段注册接线在）', () => {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/index.mjs'), 'utf8')
+  const lines = src.split(/\r?\n/)
+  assert.ok(lines.some((l) => l.trim().startsWith('registerAcpSection(ctx, config)')), 'apply 内调用 registerAcpSection(ctx, config)')
+})
