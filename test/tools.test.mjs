@@ -91,7 +91,9 @@ test('buildAcpQueryToolSpec：rc.1 形状 + execute + 读审计', async () => {
   assert.equal(res.ok, true)
   assert.equal(res.evidence.length, 1)
   const audit = ledger.auditStore.queryAudit({ op: 'model_query' })
-  assert.ok(Array.isArray(audit) ? audit.length >= 1 : true, 'audit 应记录')
+  assert.ok(Array.isArray(audit.items) && audit.items.length >= 1, 'audit 应记录 model_query（枚举扩展后真落账）')
+  assert.equal(audit.items[0].actor, 'model')
+  assert.equal(audit.items[0].op, 'model_query')
 })
 
 async function await_tool(tool, input) {
