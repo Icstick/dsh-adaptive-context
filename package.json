@@ -59,7 +59,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "lint": "oxlint",
-    "build:client": "node scripts/build-client.mjs"
+    "build:client": "node scripts/build-client.mjs",
+    "depcruise": "D:/DSH_workspace/.tooling/node_modules/.bin/depcruise.cmd src test"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
