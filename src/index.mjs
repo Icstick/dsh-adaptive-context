@@ -97,6 +97,69 @@ function scopeOf(_ctx) {
   return 'user-global'
 }
 
+// --- S1 P7（2026-09-05，B9 v0.3 P7）：注入调度器接线（dsh-inject-scheduler）---
+// 契约（用户拍板方案 A：主动上报）：
+//   · 调度器是**可选项**——永不因它缺失/故障阻断 ACP（fail-open，与 composer 同纪律）；
+//   · 段注册经 withService 等就绪（bundle 加载顺序不定；internal/service 模式已由 WC 实证，
+//     本仓库此前无 withService 工具，抄 WC 同款实现）；
+//   · 上报 = 注入文本生成后记录实际字符数（renderSourceLabelled 的 body.length，字符级精确）；
+//   · sessionId 空串不传 → 调度器落 global 槽（usage 表 schema 拒绝空串，M1 定）。
+
+/** 本插件在注入调度器注册表中的段 key */
+export const ACP_SECTION_KEY = 'acp.composer'
+
+/** 可选服务就绪即调用（一次 ctx.get + internal/service 订阅等就绪；cordis 4 兼容） */
+function withService(ctx, serviceName, fn) {
+  const existing = ctx.get(serviceName)
+  if (existing !== undefined && existing !== null) {
+    fn(existing)
+    return
+  }
+  const off = ctx.on('internal/service', (name) => {
+    if (name !== serviceName) return
+    const service = ctx.get(serviceName)
+    if (service !== undefined && service !== null) {
+      off()
+      fn(service)
+    }
+  })
+}
+
+/** 注册 acp.composer 段（幂等覆盖；budget=hotTokens、unit=tokens——ACP 配额是 token 口径） */
+export function registerAcpSection(ctx, config = {}) {
+  withService(ctx, 'injectScheduler', (sched) => {
+    if (!sched || typeof sched.registerSection !== 'function') return
+    void sched.registerSection({
+      key: ACP_SECTION_KEY,
+      plugin: 'dsh-adaptive-context',
+      order: 10,
+      budgetChars: config.hotTokens ?? 900,
+      unit: 'tokens',
+      refresh: 'per-turn',
+    }).catch((err) => {
+      ctx.logger?.warn?.('[acp] section register failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  })
+}
+
+/** 注入后上报实际注入量（fail-open：任何异常/缺失都静默降级，绝不阻断注入与 turn） */
+export function reportInjectionToScheduler(ctx, sessionId, body) {
+  try {
+    if (typeof body !== 'string' || body.length === 0) return
+    const sched = ctx.get('injectScheduler')
+    if (!sched || typeof sched.recordUsage !== 'function') return
+    void sched.recordUsage({
+      ...(sessionId ? { sessionId } : {}),
+      section: ACP_SECTION_KEY,
+      injectedChars: body.length,
+    }).catch((err) => {
+      ctx.logger?.warn?.('[acp] usage report failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] usage report degraded: ' + (err instanceof Error ? err.message : String(err)))
+  }
+}
+
 /** 从 pre-step 决策的 messages 提取用户文本（memos bridge 同款思路）。 */
 function userTextFromMessages(messages) {
   if (!Array.isArray(messages)) return ''
@@ -297,6 +360,9 @@ export function apply(ctx, config = {}) {
     ...acp,
     requestPromotion: (candidate, ctxArg) => expression.requestPromotion(candidate, ctxArg ?? ctx),
   })
+
+  // --- S1 P7：注入调度器段注册（可选服务；未挂 scheduler 时静默跳过）---
+  registerAcpSection(ctx, config)
 
   // --- S1 P1（2026-09-04）：acp_query 只读工具（对话即界面）---
   // 注册失败不阻断插件（工具缺失仅失去主动查询面，注入不受影响）。
