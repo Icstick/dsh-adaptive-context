@@ -20,6 +20,8 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `test/*.test.mjs` —— node:test 测试（每个 src 模块有对应测试）
 - `client/` + `lib/client.js` + `scripts/build-client.mjs` —— Web 设置页（改后需 build:client）
 - `cordis.patch.yml` —— bundle 装配补丁
+- `docs/adr/` —— 架构决策记录（只追加，见 ADR-README）
+- `.github/PULL_REQUEST_TEMPLATE.md` —— PR 模板（含架构影响栏）
 
 ## 铁律（违反会被打回）
 
