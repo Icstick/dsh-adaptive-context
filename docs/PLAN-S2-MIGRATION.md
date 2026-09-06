@@ -136,3 +136,21 @@ user track 重复性画像会被蒸馏进 user_model observation 轨道）。
   还是 S1 先合 master、S2 新开分支——推荐**同分支续做，发布时整体评估**（S1 未发布功能已在
   正式实例跑=事实验收）；
 - D4 P9（跨会话变更通知）另行立项（不在本规划）。
+
+## 9. 执行进度（2026-09-07 追加，随执行更新）
+
+| 步 | 状态 | 记录 |
+|---|---|---|
+| 1 P3 画像层 | ✅ 完成 | commit e3f46cf（store v5 溯源权威列）+ 04891c4（读侧 claimDomain 自然分组 + 注入接线）；20 新用例全绿；309 基线
+| 2 迁移管道 | ✅ 完成 | commit 0dd9469（scripts/migrate-memento.mjs 三段式）+ 6f8ba20（scope-map flatten）；9+1 用例
+| 3 真实 dry-run | ✅ 完成 | 25 entries → 32 候选（6 条切分）；guard block 0；清单见会话 dry-run 输出
+| 4 备份+迁移+对账 | ✅ 完成 | 备份 .dsh/archive/memento-backup-20260906/；32/32 插入 0 失败；对账 32；审计 op=import_memento 落账
+| 5 清空 memento + 观察期 | ⏳ 待拍板 | D1 推荐迁后清空；patch 已加 observationInjection:true（重启生效）
+| 6 观察期满退役 | ⏳ 观察期后 | §5 步骤（用户确认）
+
+执行中拍板记录：
+- workspace 层 14 条 → **升 user-global**（用户选 A1：ACP workspace scope 无时间表，主工作区资产）
+- agent 层 authority 用 **single_observation**（非 §4.1 原文 agent_self_evaluation——矩阵全 ✗ 会把 17 条工作记忆挡在注入面外；single_observation 忠实表达「一次观察」且可进 experience 段）
+- 迁移证据 sessionId 不落列（sourceRef 承载原会话追溯）——稳定内容轨，F7 闸门不受影响
+
+代码实现与 §8 侦察点的对应：observation 候选特殊待遇 = store 落库溯源权威列（v5）→ observationToCandidate 透传 → 读侧矩阵按候选自身 claimDomain 查列（§8.3/§8.4 双修正均落地）。
