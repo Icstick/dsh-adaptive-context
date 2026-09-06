@@ -25,6 +25,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync, copyFileSync } from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { writeGuard } from '../src/governance.mjs'
 import { hashHex } from '../src/constants.mjs'
@@ -134,8 +135,8 @@ export function readMementoEntries(dbPath) {
   }
 }
 
-/** dry-run：只读 + writeGuard 预检，不写任何库 */
-export function dryRun(mementoDbPath) {
+/** dry-run：只读 + writeGuard 预检，不写任何库；scopeMap='flatten' 时统计升层影响 */
+export function dryRun(mementoDbPath, scopeMap = 'identity') {
   const entries = readMementoEntries(mementoDbPath)
   const mappings = planMappings(entries)
   const list = []
@@ -158,7 +159,8 @@ export function dryRun(mementoDbPath) {
       list.push({
         entryId: m.entryId,
         track: m.track,
-        scope: m.scope,
+        scope: scopeMap === 'flatten' ? 'user-global' : m.scope,
+        sourceScope: m.scope,
         part: m.parts[i].part,
         of: m.parts[i].of,
         sourceClass: m.sourceClass,
@@ -218,8 +220,8 @@ export function hasImportAudit(ledger) {
   return Number(r.c) > 0
 }
 
-/** 执行迁移。返回报告 {total, inserted, skipped, blocked, quarantined, failed, reconciled} */
-export function runMigration({ mementoDbPath, ledgerDir }) {
+/** 执行迁移。scopeMap='flatten' 时 workspace 层升 user-global（用户 2026-09-07 拍板 A1）。 */
+export function runMigration({ mementoDbPath, ledgerDir, scopeMap = 'identity' }) {
   if (!existsSync(mementoDbPath)) throw new Error('memento db not found: ' + mementoDbPath)
   const entries = readMementoEntries(mementoDbPath)
   const mappings = planMappings(entries)
@@ -241,7 +243,7 @@ export function runMigration({ mementoDbPath, ledgerDir }) {
           content,
           contentHash: hashHex(content),
           sourceRef,
-          scopeId: m.scope === 'workspace' ? 'workspace' : 'user-global',
+          scopeId: scopeMap === 'flatten' || m.scope !== 'workspace' ? 'user-global' : 'workspace',
           sessionId: '', // 稳定内容轨：不落会话属性（F7 闸门按 sessionId 判）
           observedAt: entries.find((e) => e.id === m.entryId)?.updatedAt ?? new Date().toISOString(),
           agentKey: '',
@@ -293,13 +295,13 @@ export function runMigration({ mementoDbPath, ledgerDir }) {
 }
 
 // ---- CLI ----
-const USAGE = 'usage: node scripts/migrate-memento.mjs <dry-run|backup|run> [--memento-db P] [--ledger-dir L] [--backup-dir D] [--json]'
+const USAGE = 'usage: node scripts/migrate-memento.mjs <dry-run|backup|run> [--memento-db P] [--ledger-dir L] [--backup-dir D] [--scope-map identity|flatten] [--json]'
 function argValue(argv, name) {
   const i = argv.indexOf(name)
   return i >= 0 && argv[i + 1] ? argv[i + 1] : undefined
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.url.slice(7))
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
 if (isMain) {
   const argv = process.argv.slice(2)
   const mode = argv.find((a) => ['dry-run', 'backup', 'run'].includes(a)) ?? 'dry-run'
@@ -309,9 +311,10 @@ if (isMain) {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '')
   const backupDir = argValue(argv, '--backup-dir') ?? path.join(DSH_HOME, 'archive', 'memento-backup-' + date)
   const asJson = argv.includes('--json')
+  const scopeMap = argValue(argv, '--scope-map') === 'flatten' ? 'flatten' : 'identity'
   try {
     if (mode === 'dry-run') {
-      const r = dryRun(mementoDb)
+      const r = dryRun(mementoDb, scopeMap)
       if (asJson) { console.log(JSON.stringify(r, null, 2)); process.exit(0) }
       console.log('== memento → ACP 迁移 dry-run ==')
       console.log('memento.db:', mementoDb)
@@ -330,9 +333,10 @@ if (isMain) {
       console.log('backup ->', backupDir)
       console.log('files:', r.files.join(', '), '| checkpoint:', r.checkpoint === 'skipped' ? 'skipped' : 'busy=' + r.checkpoint)
     } else {
-      const r = runMigration({ mementoDbPath: mementoDb, ledgerDir })
+      const r = runMigration({ mementoDbPath: mementoDb, ledgerDir, scopeMap })
       if (asJson) { console.log(JSON.stringify(r, null, 2)); process.exit(0) }
       console.log('== migration run ==')
+      console.log('scope-map:', scopeMap)
       console.log('ledger:', ledgerDir)
       console.log('候选:', r.totalParts, '| 插入:', r.inserted, '| 跳过(已存在):', r.skipped,
         '| 失败:', r.failed.length, '| block:', r.blocked.length, '| quarantine:', r.quarantined.length)

@@ -182,3 +182,28 @@ test('backup：checkpoint 后复制 db（+wal/shm 如有），目录含文件', 
   assert.ok(r.files.includes('memory.db'))
   assert.equal(r.backupDir, bk)
 })
+
+
+test('scopeMap=flatten：workspace 层升 user-global（用户拍板 A1），幂等重跑仍 skip', (t) => {
+  const { dbPath } = seedMementoDb(t, SAMPLE)
+  const dir = freshDir()
+  const ledgerDir = path.join(dir, 'acp')
+  const report = runMigration({ mementoDbPath: dbPath, ledgerDir, scopeMap: 'flatten' })
+  assert.equal(report.inserted, 7)
+  const ledger = openEvidenceLedger({ dir: ledgerDir })
+  try {
+    const rows = ledger.db.prepare("SELECT * FROM evidence WHERE source_ref LIKE ?").all('%"kind":"memento"%')
+    assert.equal(rows.length, 7)
+    for (const r of rows) assert.equal(r.scope_id, 'user-global', 'flatten 后全部 user-global')
+    const a2 = rows.find((r2) => r2.source_ref.includes('"id":"a2"'))
+    assert.equal(a2.scope_id, 'user-global')
+    // 幂等：同一 ledger 上重跑全 skip
+    const second = runMigration({ mementoDbPath: dbPath, ledgerDir, scopeMap: 'flatten' })
+    assert.equal(second.inserted, 0)
+    assert.equal(second.skipped, 7)
+    assert.equal(ledger.auditStore.queryAudit({ op: 'import_memento' }).items.length, 1, '批次审计仍只记一次')
+  } finally {
+    ledger.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
