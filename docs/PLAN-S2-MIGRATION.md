@@ -103,6 +103,31 @@ user track 重复性画像会被蒸馏进 user_model observation 轨道）。
 | 5 | 清空 memento entries（快照空块）→ 观察期 2 周（用户拍板开始时间） | 注入无重复 |
 | 6 | 观察期满：增量迁移 + 摘 bundle（§5） | 单轨运行 |
 
+## 8. P3 代码侦察附录（2026-09-05 实装前发现，勿重复踩）
+
+1. **user_input 的 authority 就是 user_explicit**（extract.mjs authorityOf：user_input→user_explicit，
+   claimDomainOf：user_input→user_fact → section user_model）——**user_model 段 = 用户原始消息**
+   的天然归宿。F7 non-instructional 挡跨会话 user_input 时，挡的也是 user_explicit/user_model。
+   ⇒ P3 的放行对象**不能是 evidence 级 user_input**（那等于推翻 F7），必须是
+   **observation 轨（consolidation 蒸馏产物）**：重复信号蒸馏出的稳定画像才跨会话放行。
+2. **observation 轨现状**：store.listObservations(scopeId) 返回全部 active（无域过滤）；
+   observation 表有 claim_domain 列；注入侧 observationToCandidate 传 o.claimDomain ?? 'experience'
+   → user_model 域 observation 可自然进 user_model section。**observationInjection 默认 false
+   （P1-1 2026-09-02 冻结：consolidation 失败吞批止血）——P3 = 打开开关 + 域路由 + 修复吞批遗留**。
+3. **新坑：observation 候选 authority='single_observation'**（observationToCandidate 硬编码）
+   → readGuard 的 authority→claimDomain 矩阵对 user_model 列很可能 ✗（注释"single_observation
+   不影响 preference/style"）→ user_model observation 即使打开也会被 readGuard 挡。
+   ⇒ 需要 observation 候选的特殊待遇（蒸馏产物 ≠ 原始 evidence：其权威来自 evidenceIds 溯源，
+   矩阵应放行或绕过——设计点：observation 走独立 readGuard 分支或矩阵加行）。
+4. **读侧 targetDomain 语义**（composer → readGuard 传 targetDomain='work'）：矩阵列查的是
+   "authority 能否 claim work 域"，与候选自身 claimDomain 无关——历史包袱。P3 一并修正为
+   按候选 claimDomain 查列（或 observation 分支绕过）。写入侧矩阵保留（写边界权威约束）。
+5. 修完后的验收信号（用户例子）：会话 A 说"视觉工具更新了 X"数次/被纠正确认 → consolidation
+   蒸出 user_model/experience observation → 会话 B（同 workspace，另一工作流）pre-step 稳定
+   收到"用户画像/经验：视觉工具状态"——不再依赖词法召回。
+6. P9（跨会话变更通知）与 P3 的关系：P3 解决"画像/经验稳定可见"（慢信号）；P9 解决
+   "刚发生的完成事件即时感知"（快信号，轻量广播）——两者正交，P9 单独立项。
+
 ## 7. 决策点（需要用户拍板/知悉）
 
 - D1 观察期清空策略（§4.3：迁后清空留插件 vs 双写观察）——本文件推荐**迁后清空**；
