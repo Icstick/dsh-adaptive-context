@@ -97,7 +97,8 @@ export function createAcpService({ ledger, startupRebuild = true }) {
       for (const ev of cands.items) {
         const g = readGuard(ev, {
           scopeId: q.scopeId,
-          targetDomain: q.targetDomain,
+          // P3（2026-09-07）：无显式 targetDomain 时按候选自身 claimDomain 查矩阵列
+          targetDomain: q.targetDomain ?? ev.claimDomain ?? undefined,
           validAt: q.validAt,
           allowSuperseded,
         })

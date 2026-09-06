@@ -16,6 +16,7 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { makeAcpQueryTool } from './tools.mjs'
 import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
 import { createLlmRouter } from './providers/llm-router.mjs'
@@ -29,7 +30,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'adaptive-context'
-export const inject = ['llm']
+export const inject = ['llm', 'tools']
 
 export const Config = z.object({
   ledgerDir: z.string(),
@@ -41,6 +42,8 @@ export const Config = z.object({
    *  接线已就位，打开即用，无需改代码。 */
   observationInjection: z.boolean().default(false),
   recallLimit: z.number().step(1).min(1).default(20),
+  // DEPRECATED（2026-09-07，PLAN-S2 P3）：读侧矩阵列已按候选自身 claimDomain 自然分组，
+  // 本键不再影响注入（保留键位仅为兼容存量配置/settings 页；新语义无需配置）。
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
   // 跨会话注入闸门（2026-08-30 决策 D1，ISSUES-INJECTION-ISOLATION.md F7）：
   //   non-instructional（默认）——跨会话只注入非指令性内容（agent_authored/external_tool…），
@@ -79,6 +82,9 @@ export const Config = z.object({
   // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
   autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
   viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
+  // S1 P2（2026-09-04）：section quota 覆盖（如 { user_model: 800 }）。
+  // 不配置 = composer 用 MVP_SECTION_QUOTA（user_model 180/…）；总预算仍由 hotTokens 控制。
+  sectionQuota: z.any(),
   policyConfig: z.any(),                   // 可选：policy 覆盖（minEvents/maxEvidenceAgeDays…；
                                            // floors 收口由 policy.mjs 保证，只允许更严）
 })
@@ -91,6 +97,69 @@ export const Config = z.object({
  */
 function scopeOf(_ctx) {
   return 'user-global'
+}
+
+// --- S1 P7（2026-09-05，B9 v0.3 P7）：注入调度器接线（dsh-inject-scheduler）---
+// 契约（用户拍板方案 A：主动上报）：
+//   · 调度器是**可选项**——永不因它缺失/故障阻断 ACP（fail-open，与 composer 同纪律）；
+//   · 段注册经 withService 等就绪（bundle 加载顺序不定；internal/service 模式已由 WC 实证，
+//     本仓库此前无 withService 工具，抄 WC 同款实现）；
+//   · 上报 = 注入文本生成后记录实际字符数（renderSourceLabelled 的 body.length，字符级精确）；
+//   · sessionId 空串不传 → 调度器落 global 槽（usage 表 schema 拒绝空串，M1 定）。
+
+/** 本插件在注入调度器注册表中的段 key */
+export const ACP_SECTION_KEY = 'acp.composer'
+
+/** 可选服务就绪即调用（一次 ctx.get + internal/service 订阅等就绪；cordis 4 兼容） */
+function withService(ctx, serviceName, fn) {
+  const existing = ctx.get(serviceName)
+  if (existing !== undefined && existing !== null) {
+    fn(existing)
+    return
+  }
+  const off = ctx.on('internal/service', (name) => {
+    if (name !== serviceName) return
+    const service = ctx.get(serviceName)
+    if (service !== undefined && service !== null) {
+      off()
+      fn(service)
+    }
+  })
+}
+
+/** 注册 acp.composer 段（幂等覆盖；budget=hotTokens、unit=tokens——ACP 配额是 token 口径） */
+export function registerAcpSection(ctx, config = {}) {
+  withService(ctx, 'injectScheduler', (sched) => {
+    if (!sched || typeof sched.registerSection !== 'function') return
+    void sched.registerSection({
+      key: ACP_SECTION_KEY,
+      plugin: 'dsh-adaptive-context',
+      order: 10,
+      budgetChars: config.hotTokens ?? 900,
+      unit: 'tokens',
+      refresh: 'per-turn',
+    }).catch((err) => {
+      ctx.logger?.warn?.('[acp] section register failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  })
+}
+
+/** 注入后上报实际注入量（fail-open：任何异常/缺失都静默降级，绝不阻断注入与 turn） */
+export function reportInjectionToScheduler(ctx, sessionId, body) {
+  try {
+    if (typeof body !== 'string' || body.length === 0) return
+    const sched = ctx.get('injectScheduler')
+    if (!sched || typeof sched.recordUsage !== 'function') return
+    void sched.recordUsage({
+      ...(sessionId ? { sessionId } : {}),
+      section: ACP_SECTION_KEY,
+      injectedChars: body.length,
+    }).catch((err) => {
+      ctx.logger?.warn?.('[acp] usage report failed: ' + (err instanceof Error ? err.message : String(err)))
+    })
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] usage report degraded: ' + (err instanceof Error ? err.message : String(err)))
+  }
 }
 
 /** 从 pre-step 决策的 messages 提取用户文本（memos bridge 同款思路）。 */
@@ -191,8 +260,15 @@ export function viewRowToCandidate(r, fallbackScopeId) {
  * 4 个查询接口在生产代码零调用方，8 条 observation 从未进过注入。而"索引常驻、正文按需"
  * 这套两段式注入需要的浓缩层，其实已经躺在库里。
  *
- * 权威定级：observation 是 LLM 从多条证据提炼的推断，按铁律「Learning does not imply promotion」，
- * 一律记 single_observation + confidence 0.6，由 readGuard 的 authority→claimDomain 矩阵决定能进哪些域。
+ * 权威定级（P3，2026-09-07，PLAN-S2 §8.3 修正）：observation 是蒸馏产物 ≠ 原始 evidence，
+ * 其权威来自溯源证据（store.upsertObservation 写行时按 evidenceIds 聚合落 authority 列，
+ * 见 store.deriveObservationAuthority）。行 authority 缺失/未知（旧行、无溯源）回退
+ * single_observation——单次观察不得影响 user_preference/style（矩阵兜底）。
+ * confidence 0.6：不宣称权威（五铁律：Confidence is not authority）。
+ *
+ * 注入面标签 sourceClass='observation'：只用于渲染标签与候选语义，不参与写入侧
+ * sourceClass 枚举（那 5 值是写边界约束）。无 sessionId → 不过跨会话闸门、不罚降权
+ * （稳定画像全局可见 = P3 放行语义；原始 user_input 的 F7 闸门不受影响）。
  */
 export function observationToCandidate(o, fallbackScopeId) {
   const subject = String(o.subject ?? '').trim()
@@ -202,9 +278,9 @@ export function observationToCandidate(o, fallbackScopeId) {
   return {
     id: o.id,
     content: head + text,
-    sourceClass: 'agent_authored',
+    sourceClass: 'observation',
     claimDomain: o.claimDomain ?? 'experience',
-    authority: 'single_observation',
+    authority: o.authority ?? 'single_observation',
     confidence: 0.6,
     durability: 0.6,
     sensitivity: 'private',
@@ -274,6 +350,7 @@ export function apply(ctx, config = {}) {
       hotTokens: z.number().step(1).min(1),
       observationInjection: z.boolean(),
       recallLimit: z.number().step(1).min(1),
+      // deprecated：读侧已按候选自身 claimDomain 分组，不再影响注入（保留键位兼容）
       targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
       crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
       subagentDowngrade: z.boolean(),
@@ -293,6 +370,21 @@ export function apply(ctx, config = {}) {
     ...acp,
     requestPromotion: (candidate, ctxArg) => expression.requestPromotion(candidate, ctxArg ?? ctx),
   })
+
+  // --- S1 P7：注入调度器段注册（可选服务；未挂 scheduler 时静默跳过）---
+  registerAcpSection(ctx, config)
+
+  // --- S1 P1（2026-09-04）：acp_query 只读工具（对话即界面）---
+  // 注册失败不阻断插件（工具缺失仅失去主动查询面，注入不受影响）。
+  try {
+    ctx.tools.register(makeAcpQueryTool({
+      ledger,
+      auditStore: acp.auditStore || ledger.auditStore,
+      scopeId: scopeOf(ctx),
+    }))
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] acp_query register failed: ' + (err && err.message))
+  }
 
   // --- M3 C3：启动校验（views are rebuildable）---
   // verifyView 失配且 startupRebuild=true → 自动重建（含首启未构建视图的首次物化）；
@@ -484,12 +576,13 @@ export function apply(ctx, config = {}) {
       const result = compose([...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
-        targetDomain: config.targetDomain ?? 'work',
         hasProvider,
         providerWeights,
         // P0-5：hotTokens 现在真的生效（此前 composer 从不读取 = 死配置）。
         // 默认对齐 MVP_TOTAL_BUDGET(900)，行为不变；要放宽注入窗口就调这个值。
         maxTokens: config.hotTokens ?? 900,
+        // S1 P2：section quota 覆盖（如 { user_model: 800 }）；缺省 MVP_SECTION_QUOTA。
+        quota: config.sectionQuota,
         currentSessionId: sessionId,
         crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
       })
@@ -512,6 +605,8 @@ export function apply(ctx, config = {}) {
       // source-labelled plugin message：untrusted historical context，
       // 不伪装成 System Instruction（MemOS DSH adapter 验证过的范式）。
       const body = renderSourceLabelled(result.items, { currentSessionId: sessionId })
+      // S1 P7：注入实际发生（items 非空）→ 向调度器上报实际注入字符（fail-open）
+      reportInjectionToScheduler(ctx, sessionId, body)
       const ours = createUserMessage({
         content: [{ type: 'text', text: body }],
         source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },

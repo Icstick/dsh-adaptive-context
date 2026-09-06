@@ -191,11 +191,15 @@ export function compose(rawCandidates, opts = {}) {
   telemetry.retrieved = (rawCandidates ?? []).length
 
   // —— Eligibility：readGuard 过滤（scope/state/sensitivity/temporal/authority-domain）——
+  // P3（2026-09-07，PLAN-S2 §8.4）：读侧矩阵列 = 候选**自身 claimDomain**（自然分组），
+  // 修正历史包袱——旧实现统一按 opts.targetDomain（配置默认 'work'）查矩阵列，
+  // 与候选宣称的域无关：single_observation 证据一律按 work 列放行、画像域分级形同虚设。
+  // opts.targetDomain 参数保留仅为兼容（不再影响矩阵列选择）。
   const eligible = []
   for (const cand of rawCandidates ?? []) {
     const g = readGuard(cand, {
       scopeId: opts.scopeId,
-      targetDomain: opts.targetDomain,
+      targetDomain: cand.claimDomain ?? undefined,
       validAt: opts.validAt,
     })
     if (g.allowed) eligible.push(cand)

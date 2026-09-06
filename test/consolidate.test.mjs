@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { openEvidenceLedger } from '../src/store.mjs'
+import { SCHEMA_VERSION } from '../src/constants.mjs'
 import {
   createConsolidator, parseObservations, ruleObservationFor, buildConsolidationPrompt,
 } from '../src/consolidate.mjs'
@@ -281,6 +282,20 @@ test('buildConsolidationPrompt：system 含 JSON 契约，user 含证据 JSON', 
   assert.ok(userText.includes('用 pnpm'))
 })
 
+test('buildConsolidationPrompt：P3 修复后输出硬约束（≤120 字符、整批 ≤3 条、禁逐条复制）', () => {
+  const { system, userText } = buildConsolidationPrompt(
+    Array.from({ length: 4 }, (_, i) => ({ id: 'e' + i, claimDomain: 'work', content: '内容'.repeat(500) })),
+  )
+  assert.ok(system.includes('AT MOST 3 observations'))
+  assert.ok(system.includes('120 characters'))
+  assert.ok(system.includes('do not copy evidence text verbatim'))
+  assert.ok(userText.includes('[truncated'))
+  const e0 = userText.indexOf('e0')
+  assert.ok(e0 >= 0)
+  const tail = userText.slice(e0, e0 + 900)
+  assert.ok(!tail.includes('内容'.repeat(500).slice(0, 700)), '输入必须被截短')
+})
+
 // ===================== schema v2 迁移 =====================
 
 test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移且不破坏 evidence', () => {
@@ -303,7 +318,7 @@ test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移�
     try {
       assert.equal(
         ledger.db.prepare("SELECT value FROM acp_meta WHERE key = 'schema_version'").get().value,
-        '4',
+        String(SCHEMA_VERSION),
       )
       assert.ok(ledger.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observation'").get())
       const items = ledger.query({ scopeId: 'user-global' }).items

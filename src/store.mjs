@@ -10,6 +10,7 @@
 // 数据写 + audit 写同事务提交（写后即审）。
 // v4（2026-08-30，feature/injection-isolation）：evidence 表新增 session_id 列
 // （会话分层注入/隔离用）；存量库 ALTER TABLE + 从 source_ref.sessionEventId 解析回填。
+// v5（2026-09-07，PLAN-S2 P3）：observation 表新增 authority 列（溯源权威聚合），见 constants。
 
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS observation (
   subject       TEXT NOT NULL,
   predicate     TEXT NOT NULL,
   claim_domain  TEXT NOT NULL,
+  authority     TEXT,                    -- 溯源权威（v5，PLAN-S2 P3；NULL=旧行，读侧回退 single_observation）
   text          TEXT NOT NULL,
   evidence_ids  TEXT NOT NULL DEFAULT '[]',  -- JSON array
   supersedes    TEXT NOT NULL DEFAULT '[]',  -- JSON array（方案甲：直接前驱）
@@ -173,6 +175,7 @@ export function openEvidenceLedger(opts = {}) {
   // v3 → v4 evidence 加 session_id 列并从 source_ref 回填。
   // SCHEMA 全部 CREATE TABLE IF NOT EXISTS，不破坏既有表；新库亦走此路径写入当前版本号。
   migrateSessionId(db)
+  migrateObservationAuthority(db)
   if (existingVersion !== SCHEMA_VERSION) {
     db.prepare('INSERT OR REPLACE INTO acp_meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION))
   }
@@ -410,8 +413,8 @@ export function openEvidenceLedger(opts = {}) {
 
   const insertObservationStmt = db.prepare(`
     INSERT OR IGNORE INTO observation (
-      id, scope_id, subject, predicate, claim_domain, text, evidence_ids, supersedes, state, observed_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, scope_id, subject, predicate, claim_domain, authority, text, evidence_ids, supersedes, state, observed_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   /** 稳定派生 id：同键 + 同正文 + 同证据集重派生天然幂等（重复写不产生新行） */
@@ -443,6 +446,15 @@ export function openEvidenceLedger(opts = {}) {
     if (text.length > MAX_OBSERVATION_TEXT_CHARS) text = text.slice(0, MAX_OBSERVATION_TEXT_CHARS)
     const claimDomain = input.claimDomain
     const evidenceIds = Array.isArray(input.evidenceIds) ? input.evidenceIds.map(String) : []
+    // P3（PLAN-S2 §8.3）：observation 的权威来自溯源证据（蒸馏产物 ≠ 原始 evidence）。
+    // 显式 authority（import 恢复等）优先；缺省按 evidenceIds 聚合（deterministic）。
+    let authority = null
+    if (input.authority !== undefined && input.authority !== null) {
+      assertChoice(input.authority, AUTHORITIES, 'authority')
+      authority = input.authority
+    } else {
+      authority = resolveObservationAuthority(db, evidenceIds)
+    }
     const id = input.id ?? observationIdOf({ scopeId, subject, predicate, claimDomain, text, evidenceIds })
 
     // 幂等：同 id（同键+同正文+同证据）重写直接返回，不自 supersede
@@ -466,7 +478,8 @@ export function openEvidenceLedger(opts = {}) {
       }
 
       insertObservationStmt.run(
-        id, scopeId, subject, predicate, claimDomain, text,
+        id, scopeId, subject, predicate, claimDomain, authority,
+        text,
         JSON.stringify(evidenceIds), JSON.stringify(supersedes), 'active',
         input.observedAt ?? new Date().toISOString(), Date.now(),
       )
@@ -599,6 +612,59 @@ function migrateSessionId(db) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence (session_id, state)')
 }
 
+/**
+ * v4 → v5 迁移：observation 表加 authority 列（溯源权威）。
+ * 幂等：列已存在（新库 SCHEMA 直建）则 no-op；存量行保持 NULL（读侧回退 single_observation）。
+ * @param {object} db - DatabaseSync 句柄
+ */
+function migrateObservationAuthority(db) {
+  const cols = db.prepare('PRAGMA table_info(observation)').all()
+  if (!cols.some((c) => c.name === 'authority')) {
+    db.exec('ALTER TABLE observation ADD COLUMN authority TEXT')
+  }
+}
+
+/**
+ * Observation 溯源权威聚合（P3，PLAN-S2 §8.3）。
+ * 秩序 = authority 的"用户确定性"排序：纠正 > 用户显式声明 > 系统策略 > 外部信息
+ * > 单次观察 > agent 推断 > agent 自评。取批内最高秩（并列取先出现的，确定性）。
+ * @param {string[]} authorities - 溯源 evidence 的 authority 值集合
+ * @returns {string} AUTHORITIES 之一
+ */
+export function deriveObservationAuthority(authorities) {
+  const rank = {
+    user_correction: 6,
+    user_explicit: 5,
+    system_policy: 4,
+    external_information: 3,
+    single_observation: 2,
+    agent_inference: 1,
+    agent_self_evaluation: 0,
+  }
+  if (!Array.isArray(authorities) || authorities.length === 0) return 'single_observation'
+  let best = 'single_observation'
+  let bestRank = -1
+  for (const a of authorities) {
+    const r = rank[a]
+    if (r === undefined) continue
+    if (r > bestRank) { bestRank = r; best = a }
+  }
+  return best
+}
+
+/** 按 evidenceIds 查库聚合溯源权威（分块防变量上限；无匹配/空 → single_observation 兜底） */
+function resolveObservationAuthority(db, evidenceIds) {
+  if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return 'single_observation'
+  const found = []
+  for (let i = 0; i < evidenceIds.length; i += 400) {
+    const chunk = evidenceIds.slice(i, i + 400)
+    const marks = chunk.map(() => '?').join(',')
+    const rows = db.prepare('SELECT authority FROM evidence WHERE id IN (' + marks + ')').all(...chunk)
+    for (const r of rows) found.push(r.authority)
+  }
+  return deriveObservationAuthority(found)
+}
+
 function toEvidence(r) {
   return {
     id: r.id,
@@ -637,6 +703,7 @@ function toObservation(r) {
     subject: r.subject,
     predicate: r.predicate,
     claimDomain: r.claim_domain,
+    authority: r.authority ?? null,
     text: r.text,
     evidenceIds: JSON.parse(r.evidence_ids),
     supersedes: JSON.parse(r.supersedes),
