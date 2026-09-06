@@ -74,7 +74,7 @@ const hintStyle = { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #
 const inputStyle = {
   fontSize: '13px', padding: '4px 8px', borderRadius: '6px',
   border: '1px solid var(--dsw-alias-border-l2, #d1d5db)',
-  background: 'var(--dsw-alias-field-bg, #fff)', color: 'var(--dsw-alias-label-primary, #111827)',
+  background: 'var(--dsw-alias-bg-module-platform)', color: 'var(--dsw-alias-label-primary, #111827)',
 }
 const badgeStyle = {
   fontSize: '11px', color: '#b45309', background: '#fef3c7',
