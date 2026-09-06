@@ -78,6 +78,7 @@ function rowToObservation(r) {
     subject: r.subject,
     predicate: r.predicate,
     claimDomain: r.claim_domain,
+    authority: r.authority ?? null,
     text: r.text,
     evidenceIds: JSON.parse(r.evidence_ids),
     supersedes: JSON.parse(r.supersedes),
@@ -295,7 +296,7 @@ function importEvidence(data, deps) {
 }
 
 const OBSERVATION_COLS = [
-  'id', 'scope_id', 'subject', 'predicate', 'claim_domain', 'text',
+  'id', 'scope_id', 'subject', 'predicate', 'claim_domain', 'authority', 'text',
   'evidence_ids', 'supersedes', 'state', 'observed_at', 'created_at',
 ]
 
@@ -311,6 +312,10 @@ function importObservation(data, deps) {
   assertEnum(data.claimDomain, CLAIM_DOMAINS, 'observation.claimDomain')
   assertEnum(data.scopeId ?? 'user-global', SCOPES, 'observation.scopeId')
   assertEnum(data.state ?? 'active', OBSERVATION_STATES, 'observation.state')
+  // authority（v5）：可选；显式提供须为 AUTHORITIES 之一（null 允许 = 旧行/未知溯源）
+  if (data.authority !== undefined && data.authority !== null) {
+    assertEnum(data.authority, AUTHORITIES, 'observation.authority')
+  }
 
   // 幂等键 = id（store.upsertObservation 的 id 语义：同键+同正文+同证据自然幂等）
   const hit = ledger.db.prepare('SELECT id FROM observation WHERE id = ?').get(data.id)
@@ -325,6 +330,7 @@ function importObservation(data, deps) {
     data.subject,
     data.predicate,
     data.claimDomain,
+    data.authority ?? null,
     data.text,
     JSON.stringify(Array.isArray(data.evidenceIds) ? data.evidenceIds : []),
     JSON.stringify(Array.isArray(data.supersedes) ? data.supersedes : []),

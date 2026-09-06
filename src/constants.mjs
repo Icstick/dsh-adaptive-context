@@ -3,7 +3,10 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 4
+// v5（2026-09-07，PLAN-S2 P3）：observation 表新增 authority 列——蒸馏产物的溯源权威
+// （写行时按 evidenceIds 聚合：user_correction > user_explicit > … > single_observation）。
+// 存量库 ALTER TABLE，旧行 authority=NULL（读侧回退 single_observation）。
+export const SCHEMA_VERSION = 5
 export const DEFAULT_DB_NAME = 'acp-ledger.db'
 
 /** Evidence 状态机 */

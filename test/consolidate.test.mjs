@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { openEvidenceLedger } from '../src/store.mjs'
+import { SCHEMA_VERSION } from '../src/constants.mjs'
 import {
   createConsolidator, parseObservations, ruleObservationFor, buildConsolidationPrompt,
 } from '../src/consolidate.mjs'
@@ -303,7 +304,7 @@ test('schema v2：旧库（版本 1、无 observation 表）打开自动迁移�
     try {
       assert.equal(
         ledger.db.prepare("SELECT value FROM acp_meta WHERE key = 'schema_version'").get().value,
-        '4',
+        String(SCHEMA_VERSION),
       )
       assert.ok(ledger.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observation'").get())
       const items = ledger.query({ scopeId: 'user-global' }).items
