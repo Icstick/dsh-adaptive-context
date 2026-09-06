@@ -110,10 +110,13 @@ export function buildConsolidationPrompt(evidences, maxContentChars = CONSOLIDAT
     '{"observations":[{"subject":"...","predicate":"...","claimDomain":"...","text":"...","evidenceIds":["..."]}]}',
     `claimDomain must be one of: ${CLAIM_DOMAINS.join(', ')}.`,
     'Domain guidance: style = tone/format/presentation preferences (e.g. 简洁/详细/亲切的语气, 先结论后展开, 中文回复); user_preference = substantive preferences (e.g. 用 pnpm, 用 Bun). 表达风格偏好一律标 style，不要标 user_preference。',
-    'subject is a short noun phrase; predicate is a short relation verb; text is a concise fact (<= 200 chars); evidenceIds reference the supporting evidence ids.',
+    'subject is a short noun phrase (<= 20 chars); predicate is a short relation verb; text is a very concise fact (<= 120 characters, 中文 <= 60 字); evidenceIds reference the supporting evidence ids.',
     // P0-7（2026-09-02）：输出收敛——模型曾按每条 evidence 机械输出一条完整 observation
     // （20 条 × ~700 token 超 maxTokens 截断 → 连败）。改为显式引导合并 + 短文本。
-    'Merge related evidence into the fewest high-value observations; never emit one observation per evidence record mechanically.',
+    // P3 修复（2026-09-06）：batch8 × 800 字输入实测仍 ~12K token 机械输出（55 连败，
+    // last failure finish=length）。输出预算改为**硬约束**：整批至多 3 条 + 禁止逐条展开。
+    'Output AT MOST 3 observations for the whole batch, no matter how many evidence records are given.',
+    'Merge related evidence into the fewest high-value observations; NEVER emit one observation per evidence record; do not copy evidence text verbatim.',
     'Do not invent facts absent from the evidence. Do not output anything except the JSON.',
   ].join('\n')
   // P0-4：单条正文截断（默认 800 字符），避免长证据把 prompt 撑爆。

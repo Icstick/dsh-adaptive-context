@@ -92,7 +92,9 @@ export const CONSOLIDATION_META_TURN_COUNT = 'consolidation_turn_count'
  *  背景：批次原为「全部未消化 active 证据」且 prompt 全文 JSON 化，无上限 →
  *  多子代理高频 turn/end 时是唯一的成本放大面（denial-of-wallet）。 */
 export const CONSOLIDATION_MAX_BATCH = 40
-export const CONSOLIDATION_MAX_CONTENT_CHARS = 800
+// P3 修复（2026-09-06）：单条证据正文截断 800→400——输入越短，模型越不容易逐条复制展开
+// （55 连败实测：8 条 × 800 字输入 → ~12K token 机械输出撞 maxTokens）
+export const CONSOLIDATION_MAX_CONTENT_CHARS = 400
 export const CONSOLIDATION_MAX_RUNS_PER_DAY = 24
 /** 失败留痕与日频计数（P0-1/P0-4） */
 export const CONSOLIDATION_META_FAIL_COUNT = 'consolidation_fail_count'
