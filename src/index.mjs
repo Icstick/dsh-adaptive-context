@@ -42,6 +42,8 @@ export const Config = z.object({
    *  接线已就位，打开即用，无需改代码。 */
   observationInjection: z.boolean().default(false),
   recallLimit: z.number().step(1).min(1).default(20),
+  // DEPRECATED（2026-09-07，PLAN-S2 P3）：读侧矩阵列已按候选自身 claimDomain 自然分组，
+  // 本键不再影响注入（保留键位仅为兼容存量配置/settings 页；新语义无需配置）。
   targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
   // 跨会话注入闸门（2026-08-30 决策 D1，ISSUES-INJECTION-ISOLATION.md F7）：
   //   non-instructional（默认）——跨会话只注入非指令性内容（agent_authored/external_tool…），
@@ -258,8 +260,15 @@ export function viewRowToCandidate(r, fallbackScopeId) {
  * 4 个查询接口在生产代码零调用方，8 条 observation 从未进过注入。而"索引常驻、正文按需"
  * 这套两段式注入需要的浓缩层，其实已经躺在库里。
  *
- * 权威定级：observation 是 LLM 从多条证据提炼的推断，按铁律「Learning does not imply promotion」，
- * 一律记 single_observation + confidence 0.6，由 readGuard 的 authority→claimDomain 矩阵决定能进哪些域。
+ * 权威定级（P3，2026-09-07，PLAN-S2 §8.3 修正）：observation 是蒸馏产物 ≠ 原始 evidence，
+ * 其权威来自溯源证据（store.upsertObservation 写行时按 evidenceIds 聚合落 authority 列，
+ * 见 store.deriveObservationAuthority）。行 authority 缺失/未知（旧行、无溯源）回退
+ * single_observation——单次观察不得影响 user_preference/style（矩阵兜底）。
+ * confidence 0.6：不宣称权威（五铁律：Confidence is not authority）。
+ *
+ * 注入面标签 sourceClass='observation'：只用于渲染标签与候选语义，不参与写入侧
+ * sourceClass 枚举（那 5 值是写边界约束）。无 sessionId → 不过跨会话闸门、不罚降权
+ * （稳定画像全局可见 = P3 放行语义；原始 user_input 的 F7 闸门不受影响）。
  */
 export function observationToCandidate(o, fallbackScopeId) {
   const subject = String(o.subject ?? '').trim()
@@ -269,9 +278,9 @@ export function observationToCandidate(o, fallbackScopeId) {
   return {
     id: o.id,
     content: head + text,
-    sourceClass: 'agent_authored',
+    sourceClass: 'observation',
     claimDomain: o.claimDomain ?? 'experience',
-    authority: 'single_observation',
+    authority: o.authority ?? 'single_observation',
     confidence: 0.6,
     durability: 0.6,
     sensitivity: 'private',
@@ -341,6 +350,7 @@ export function apply(ctx, config = {}) {
       hotTokens: z.number().step(1).min(1),
       observationInjection: z.boolean(),
       recallLimit: z.number().step(1).min(1),
+      // deprecated：读侧已按候选自身 claimDomain 分组，不再影响注入（保留键位兼容）
       targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
       crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
       subagentDowngrade: z.boolean(),
@@ -566,7 +576,6 @@ export function apply(ctx, config = {}) {
       const result = compose([...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
-        targetDomain: config.targetDomain ?? 'work',
         hasProvider,
         providerWeights,
         // P0-5：hotTokens 现在真的生效（此前 composer 从不读取 = 死配置）。
