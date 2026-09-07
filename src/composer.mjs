@@ -263,7 +263,7 @@ export function compose(rawCandidates, opts = {}) {
       providerWeights: providerWeights ?? undefined,
       providerMax,
     })
-    const section = sectionOf(cand)
+    const section = cand.section ?? sectionOf(cand) // T4 M4.4：显式 section 覆盖（rules 段）
     const quotaTable = opts.quota ?? MVP_SECTION_QUOTA
     const raw = String(cand.content ?? '')
     // 决策 2（2026-09-02）：单条最多占本 section 配额的 60%，超出则**截断 + 标注可回溯 id**，

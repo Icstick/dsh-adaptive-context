@@ -620,7 +620,25 @@ export function apply(ctx, config = {}) {
       const providerWeights = {}
       for (const p of enabledProviders) providerWeights[p.id] = p.weight ?? 1
 
-      const result = compose([...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
+      // T4 M4.4：生效规则常驻 rules 段（≤3 条 × ≤150 字；Q2(a) 拍板 30 token 预算）。
+      // 候选带显式 section='rules'（composer 覆盖 sectionOf）。注意：规则域
+      // （workflow/habit/…）不是 claimDomain 6 值——不设 claimDomain，readGuard
+      // 无 targetDomain 跳过资格矩阵放行；渲染以 [acp:rule] 标识来源。
+      let ruleCandidates = []
+      try {
+        const ruleRows = ledger.ruleStore.queryRules({ state: 'active', limit: 10 }).items
+        ruleCandidates = ruleRows.slice(0, 3).map((r) => ({
+          id: r.id,
+          content: String(r.text ?? '').slice(0, 150),
+          scopeId,
+          sourceClass: 'rule',
+          state: 'active',
+          section: 'rules',
+        }))
+      } catch (err) {
+        ctx.logger?.warn?.('[acp] rule candidates failed: ' + (err instanceof Error ? err.message : String(err)))
+      }
+      const result = compose([...ruleCandidates, ...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
         hasProvider,

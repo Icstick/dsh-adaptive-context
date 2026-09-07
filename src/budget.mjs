@@ -21,11 +21,15 @@ export const HARD_MAX = 8000
 /** Section quota（MVP，COMPOSER.md §5.3） */
 // 2026-09-02 修正：删除 provenance 配额——sectionOf 从不产出该 section，50 token 是死配额
 // （配额表比没有配额更坏：看起来可分配，实际永远空转）。这 50 token 转给 memory，总额仍 900。
+// T4 M4.4（2026-09-07）：新增 rules 段（反馈通道生效规则常驻，≤2 行铁律）——
+// 实测校准：单条带 source 标签固定开销 LINE_LABEL_TOKENS=20，30 token 装不下任何规则
+// （pack 实测 drop 'section rules budget'）→ rules 60（memory 350→290），总额仍 900 不回退。
 export const MVP_SECTION_QUOTA = Object.freeze({
   user_model: 180,     // Profile / 用户画像
   work_state: 250,     // WorkState / 决策（checkpoint 接线后启用）
-  memory: 350,         // Observations / 相关记忆（原 300 + provenance 让出的 50）
+  memory: 290,         // Observations / 相关记忆（原 350 - rules 让渡 60）
   expression: 120,     // Expression few-shot
+  rules: 60,           // 生效规则（T4 反馈通道；显式 section 候选，可容纳 1-2 条铁律）
 })
 /** quota 合计 = 900，与 MVP_TOTAL_BUDGET 一致 */
 export const MVP_SECTION_TOTAL = Object.freeze(

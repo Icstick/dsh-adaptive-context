@@ -128,11 +128,14 @@ test('G9 预算承诺不回退：900/1200/6000/8000，quota 合计=900', () => {
   assert.equal(SOFT_MAX, 6000)
   assert.equal(HARD_MAX, 8000)
   assert.equal(MVP_SECTION_TOTAL, 900)
-  assert.deepEqual(Object.keys(MVP_SECTION_QUOTA).sort(), ['expression', 'memory', 'user_model', 'work_state'])
-  assert.equal(MVP_SECTION_QUOTA.memory, 350)
+  assert.deepEqual(Object.keys(MVP_SECTION_QUOTA).sort(), ['expression', 'memory', 'rules', 'user_model', 'work_state'])
+  // T4 M4.4（2026-09-07）：memory 让渡 60 给 rules（生效规则常驻段，实测校准——
+  // 单条带标签固定开销 20 token，30 装不下；总额仍 900）
+  assert.equal(MVP_SECTION_QUOTA.memory, 290)
   assert.equal(MVP_SECTION_QUOTA.user_model, 180)
   assert.equal(MVP_SECTION_QUOTA.work_state, 250)
   assert.equal(MVP_SECTION_QUOTA.expression, 120)
+  assert.equal(MVP_SECTION_QUOTA.rules, 60)
 })
 
 // ---------- G10：候选状态机 supersede 契约 ----------

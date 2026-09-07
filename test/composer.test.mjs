@@ -340,4 +340,29 @@ test('renderSourceLabelled：session- 前缀会话 id 的短码不含退化前�
 })
 
 
+// ===================== T4 M4.4：rules 段（显式 section 覆盖） =====================
+
+test('compose：显式 section=rules 候选进 rules 段（60 token 配额，实测校准），无关 query 也常驻', () => {
+  const ruleCand = {
+    id: 'rule_x', scopeId: 'user-global', state: 'active',
+    sourceClass: 'rule',
+    content: '每次提交前跑全量测试，全绿才允许 push', section: 'rules',
+  }
+  const memCand = ev({ id: 'ev_m', content: '用户偏好 TypeScript' })
+  const r = compose([ruleCand, memCand], { query: '完全不相关的查询词', scopeId: 'user-global' })
+  const rules = r.items.filter((c) => c.section === 'rules')
+  assert.equal(rules.length, 1, '规则不受相关性过滤（常驻）')
+  assert.equal(rules[0].id, 'rule_x')
+  assert.ok(r.telemetry.sectionTokens.rules <= 60, 'rules 段 ≤60 token')
+})
+
+test('renderSourceLabelled：rule 候选渲染 [acp:rule] 标签（无 claimDomain——规则域非 6 值）', () => {
+  const s = renderSourceLabelled([{
+    id: 'rule_x', sourceClass: 'rule',
+    content: '每次提交前跑全量测试', state: 'active',
+  }])
+  assert.ok(s.includes('[acp:rule | id=rule_x | domain=]'), s)
+})
+
+
 
