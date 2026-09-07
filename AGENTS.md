@@ -12,6 +12,7 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `src/service.mjs` / `store.mjs` —— 服务定义 / SQLite 账本存储（node:sqlite 单连接，append-only）
 - `src/views.mjs` / `composer.mjs` / `budget.mjs` —— 读视图 / 上下文组装 / 预算控制
 - `src/consolidate.mjs` / `extract.mjs` / `candidate.mjs` / `expression.mjs` —— 蒸馏（evidence→observation）/ 提取 / 候选 / 表达式
+- `src/rule.mjs` / `rules.mjs` / `feedback.mjs` —— 反馈通道（T4，0.3.0）：规则存储（schema v6）/ rules 视图渲染与写盘 / G1-G2 闸门 + 草拟管线；`/acp rule` 命令在 index.mjs（list/accept/reject）
 - `src/policy.mjs` —— authority 7 值与 sourceClass→authority 强制映射、冲突检测两级策略
 - `src/audit.mjs` —— 审计三链（写审计）
 - `src/rebuild.mjs` / `export-import.mjs` —— 视图重建 / 导出导入
