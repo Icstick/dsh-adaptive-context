@@ -260,6 +260,7 @@ node test/<file>.test.mjs   # 单文件直跑（沙箱环境 node --test 递归�
 ```
 
 设计文档在配套仓库 **acp-docs**（架构 / 契约 / 编排 / 治理 / 沉淀 / 表达 / 多源等）。
+仓库级开发计划与问题登记（backlog）：[docs/DEVELOPMENT-PLAN.md](docs/DEVELOPMENT-PLAN.md)。
 
 ## License 与致谢
 
