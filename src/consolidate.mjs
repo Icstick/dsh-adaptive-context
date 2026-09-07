@@ -25,6 +25,7 @@ import {
   MAX_OBSERVATION_TEXT_CHARS,
 } from './constants.mjs'
 import { PENDING_PROMOTION } from './expression.mjs'
+import { isActionFlowObservation } from './governance.mjs'
 
 // ===================== 规则兜底（LLM 不可用） =====================
 
@@ -118,6 +119,12 @@ export function buildConsolidationPrompt(evidences, maxContentChars = CONSOLIDAT
     'Output AT MOST 3 observations for the whole batch, no matter how many evidence records are given.',
     'Merge related evidence into the fewest high-value observations; NEVER emit one observation per evidence record; do not copy evidence text verbatim.',
     'Do not invent facts absent from the evidence. Do not output anything except the JSON.',
+    // T2.5（2026-09-07）：会话动作流水转写禁令——模型曾把用户消息流写成
+    // 「用户 询问/确认/审批/使用/处于/从事…」第三人称动作句，authority 虚高为 user_explicit，
+    // 每轮注入流水账（实测 86 条）。动作流水无跨会话价值，不得成为 observation。
+    'NEVER emit action transcripts of the current session such as subject=用户 with predicates like 询问/确认/审批/使用/回复/报告/处于/从事/完成 (or User asked/confirmed/used/...).',
+    'Only durable, reusable conclusions qualify: user preferences (偏好/喜欢/倾向/希望/需要), corrections, stable facts, project conventions, environment facts.',
+    'If a batch contains only such action logs, output {"observations":[]}.',
   ].join('\n')
   // P0-4：单条正文截断（默认 800 字符），避免长证据把 prompt 撑爆。
   // 截断保留可回溯性——observation 里带 evidenceIds，需要全文时按 id 回查。
@@ -414,7 +421,14 @@ export function createConsolidator(opts = {}) {
       }
 
       let wrote = 0
+      let flowSkipped = 0
       for (const obs of observations) {
+        // T2.5（2026-09-07）：动作流水形态不落库（双保险——prompt 禁令之外的硬过滤；
+        // 模型不听话时由这里兜底，防「用户 询问/确认…」再次以 user_explicit 入账）
+        if (isActionFlowObservation(obs.subject, obs.predicate)) {
+          flowSkipped += 1
+          continue
+        }
         const res = ledger.upsertObservation({ scopeId, ...obs })
         if (res.inserted || res.row) wrote += 1
         // style 候选（M3 B3）：policy 达标且 auto_promote=true → 自动提升；

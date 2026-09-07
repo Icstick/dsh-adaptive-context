@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { openEvidenceLedger, deriveObservationAuthority } from '../src/store.mjs'
+import { isActionFlowObservation } from '../src/governance.mjs'
 import { createAcpService } from '../src/service.mjs'
 import { SCHEMA_VERSION } from '../src/constants.mjs'
 import { exportJsonl, importJsonl } from '../src/export-import.mjs'
@@ -238,4 +239,27 @@ test('queryObservation：authorities 白名单过滤混合轨（T2 权威闸门�
   assert.equal(gate.total, 2, '闸门只放行高权威')
   const all = svc.queryObservations({ scopeId: 'user-global', limit: 10 })
   assert.equal(all.total, 4, '无闸门全量')
+})
+
+// ===================== T2.5（2026-09-07）：动作流水形态过滤 =====================
+
+test('isActionFlowObservation：subject=用户 + 流水谓词 → true（询问/确认/审批/使用/处于/采用…）', () => {
+  for (const p of ['询问', '确认', '审批', '使用', '回复', '处于', '从事', '采用', '选择', '同意', '指示', '知晓']) {
+    assert.equal(isActionFlowObservation('用户', p), true, 'predicate=' + p)
+  }
+  assert.equal(isActionFlowObservation('用户', 'asked'), true)
+})
+
+test('isActionFlowObservation：画像谓词保留（偏好/希望/需要/喜欢/倾向/要求/认为）', () => {
+  for (const p of ['偏好', '希望', '需要', '喜欢', '倾向', '要求', '请求', '认为', '觉得', '不喜欢', '禁止']) {
+    assert.equal(isActionFlowObservation('用户', p), false, 'predicate=' + p)
+  }
+})
+
+test('isActionFlowObservation：非用户 subject 或空谓词 → false（不误伤领域观察）', () => {
+  assert.equal(isActionFlowObservation('包管理器', '选择'), false)
+  assert.equal(isActionFlowObservation('环境验证失败', '排查'), false)
+  assert.equal(isActionFlowObservation('用户', ''), false)
+  assert.equal(isActionFlowObservation(null, '询问'), false)
+  assert.equal(isActionFlowObservation('User', 'used'), true, '英文兜底')
 })

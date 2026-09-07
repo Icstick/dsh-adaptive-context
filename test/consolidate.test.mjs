@@ -495,3 +495,28 @@ test('B3 style：无 B3 依赖 → 维持 M2 行为（仅 pending，不建候选
   assert.equal(ledger.getById(a.id).metadata.reviewStatus, PENDING_PROMOTION)
   assert.equal(ledger.candidateStore.listCandidates({}).length, 0)
 })
+
+// ===================== T2.5（2026-09-07）：动作流水转写禁令与硬过滤 =====================
+
+test('buildConsolidationPrompt：system 含流水账禁令与空输出许可（T2.5）', () => {
+  const { system } = buildConsolidationPrompt([{ id: 'e1', claimDomain: 'user_fact', content: '用户说继续' }])
+  assert.ok(system.includes('NEVER emit action transcripts'), '禁流水转写')
+  assert.ok(system.includes('{"observations":[]}'), '纯流水批允许空输出')
+})
+
+test('runOnce：LLM 产出流水形态（用户+询问）→ 落库前硬过滤，不写 observation', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  const llmCall = async () => JSON.stringify({
+    observations: [
+      { subject: '用户', predicate: '询问', claimDomain: 'user_fact', text: '用户询问消化进度', evidenceIds: ['e1', 'e2'] },
+      { subject: '包管理器', predicate: '偏好', claimDomain: 'user_preference', text: '用户偏好 pnpm', evidenceIds: ['e1', 'e2'] },
+    ],
+  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  const r = await c.runOnce()
+  assert.equal(r.observations, 1, '只写非流水 1 条')
+  const obs = ledger.queryObservation({})
+  assert.equal(obs.total, 1)
+  assert.equal(obs.items[0].subject, '包管理器')
+})

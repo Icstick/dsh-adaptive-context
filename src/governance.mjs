@@ -199,3 +199,38 @@ export function readGuard(ev, ctx = {}) {
 
   return { allowed: true, reasons }
 }
+
+// ===================== T2.5（2026-09-07）：会话动作流水形态过滤 =====================
+// 问题：consolidation 把用户消息流转写成「subject=用户 + 动作谓词」的第三人称动作句
+// （「用户 询问/确认/审批/使用…」），authority 按支撑证据聚合为 user_explicit → 过 T2 闸门，
+// 每轮注入会话流水账（实测 86 条 active user_explicit obs 属此类）。
+// 判定：subject=用户/User + predicate ∈ 动作流水词集 → 非画像、无跨会话价值。
+// 保守取向：宁可少挡（偏好词如 偏好/希望/需要/喜欢/倾向/要求 一律保留），
+// 只排除明确的一次性会话动作。本函数供读侧（composer 注入）与写侧（consolidation 落库前）双用。
+
+/** 动作流水谓词（subject=用户 时判定为会话流水账，排除） */
+export const ACTION_FLOW_PREDICATES = new Set([
+  // 会话互动/询问类
+  '询问', '问', '确认', '审批', '批准', '回复', '回应', '回答', '告知', '反馈', '报告',
+  '表示', '告诉', '提及', '提到', '承认', '否认', '回答',
+  // 动作执行类（已完成/进行中的一次性操作）
+  '使用', '让', '叫', '打开', '关闭', '点击', '拉取', '克隆', '运行', '执行', '重启', '切换',
+  '检查', '查看', '搜索', '上传', '下载', '安装', '删除', '创建', '编辑', '写入', '读取',
+  '修复', '测试', '调试', '完成', '开始', '继续', '进行', '处理', '提交', '合并', '推送',
+  '遇到', '发现', '报错', '卡在',
+  // 状态转述类（瞬态，无跨会话价值）
+  '处于', '从事', '知晓', '知道', '采用', '决定', '选择', '同意', '指示', '下令',
+  // 英文兜底（LLM 偶发英文转写）
+  'asked', 'confirmed', 'approved', 'replied', 'reported', 'used', 'requested',
+  'mentioned', 'informed', 'told', 'checked', 'opened', 'closed', 'ran', 'executed',
+  'restarted', 'switched', 'searched', 'downloaded', 'uploaded', 'created', 'deleted',
+  'edited', 'completed', 'started', 'continued', 'finished', 'tested', 'fixed',
+])
+
+/** 是否会话动作流水形态（subject=用户 + 动作谓词）——是 → 不进观察/不注入 */
+export function isActionFlowObservation(subject, predicate) {
+  const s = String(subject ?? '').trim()
+  if (s !== '用户' && s !== 'User' && s !== 'user') return false
+  const p = String(predicate ?? '').trim()
+  return ACTION_FLOW_PREDICATES.has(p)
+}

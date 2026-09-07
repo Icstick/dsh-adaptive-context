@@ -26,6 +26,7 @@ import { evaluateCandidate } from './policy.mjs'
 import {
   CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
 } from './constants.mjs'
+import { isActionFlowObservation } from './governance.mjs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
@@ -557,6 +558,9 @@ export function apply(ctx, config = {}) {
           const rows = q ? q.items : (typeof ledger.listObservations === 'function' ? ledger.listObservations(scopeId) : [])
           observationCandidates = (Array.isArray(rows) ? rows : [])
             .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
+            // T2.5（2026-09-07）：动作流水形态不进注入（「用户 询问/确认/审批…」是
+            // 会话转写，非画像——authority 聚合虚高导致过闸门）
+            .filter((o) => !isActionFlowObservation(o.subject, o.predicate))
             .map((o) => observationToCandidate(o, scopeId))
         } catch (err) {
           ctx.logger?.warn?.('[acp] acp:degraded observation_read_failed reason='
