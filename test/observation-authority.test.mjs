@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { openEvidenceLedger, deriveObservationAuthority } from '../src/store.mjs'
+import { createAcpService } from '../src/service.mjs'
 import { SCHEMA_VERSION } from '../src/constants.mjs'
 import { exportJsonl, importJsonl } from '../src/export-import.mjs'
 
@@ -164,4 +165,43 @@ test('旧格式导入（observation 行无 authority 字段）→ 行 authority=
   const res = importJsonl(oldLine + '\n', { ledger: dst, candidateStore: dst.candidateStore, auditStore: dst.auditStore })
   assert.equal(res.errors.length, 0)
   assert.equal(dst.getObservationById('obs_legacy').authority, null)
+})
+
+// ===================== queryObservations（service 面，2026-09-07 maid P0-1） =====================
+
+test('queryObservations：authorities IN 过滤 + 默认 active', (t) => {
+  const ledger = freshLedger(t)
+  const svc = createAcpService({ ledger })
+  // 直接落 observation（upsertObservation 需 evidence 溯源；这里用内部 append 路径验证 service 透传）
+  const mk = (id, authority, text) => ledger.upsertObservation({
+    id, scopeId: 'user-global', subject: 's', predicate: 'p', claimDomain: 'user_fact',
+    text, evidenceIds: [], supersedes: [], state: 'active', observedAt: Date.now(), createdAt: Date.now(), authority,
+  })
+  mk('obs_hi_1', 'user_explicit', '必须用 pnpm')
+  mk('obs_hi_2', 'user_correction', '不要用 yarn')
+  mk('obs_lo_1', 'single_observation', '普通观察')
+
+  const hi = svc.queryObservations({ scopeId: 'user-global', authorities: ['user_explicit', 'user_correction'], limit: 10 })
+  assert.equal(hi.total, 2)
+  const texts = hi.items.map((o) => o.text).join('|')
+  assert.ok(texts.includes('必须用 pnpm'))
+  assert.ok(texts.includes('不要用 yarn'))
+  assert.ok(!texts.includes('普通观察'), '低权威被 authorities 过滤')
+
+  const all = svc.queryObservations({ scopeId: 'user-global', limit: 10 })
+  assert.equal(all.total, 3, '无 authorities 参数 → 不过滤')
+})
+
+test('queryObservations：state 过滤生效（冲突翻转产生 superseded）', (t) => {
+  const ledger = freshLedger(t)
+  const svc = createAcpService({ ledger })
+  const base = { scopeId: 'user-global', subject: '键', predicate: '冲突', claimDomain: 'user_fact', evidenceIds: [], supersedes: [], observedAt: Date.now(), createdAt: Date.now() }
+  ledger.upsertObservation({ ...base, id: 'obs_v1', text: '第一版', authority: 'user_explicit' })
+  ledger.upsertObservation({ ...base, id: 'obs_v2', text: '第二版（冲突翻转 v1）', authority: 'user_explicit' })
+  const active = svc.queryObservations({ scopeId: 'user-global', state: 'active', limit: 10 })
+  assert.equal(active.total, 1)
+  assert.equal(active.items[0].id, 'obs_v2')
+  const old = svc.queryObservations({ scopeId: 'user-global', state: 'superseded', limit: 10 })
+  assert.equal(old.total, 1)
+  assert.equal(old.items[0].id, 'obs_v1')
 })

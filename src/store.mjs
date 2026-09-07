@@ -517,6 +517,12 @@ export function openEvidenceLedger(opts = {}) {
     if (q.claimDomain) { conds.push('claim_domain = ?'); params.push(q.claimDomain) }
     if (q.subject) { conds.push('subject = ?'); params.push(q.subject) }
     if (q.predicate) { conds.push('predicate = ?'); params.push(q.predicate) }
+    // 2026-09-07（maid P0-1）：authority 过滤（IN 列表，供 PIN 钉扎只取高权威轨）
+    if (Array.isArray(q.authorities) && q.authorities.length > 0) {
+      const marks = q.authorities.map(() => '?').join(', ')
+      conds.push('authority IN (' + marks + ')')
+      params.push(...q.authorities)
+    }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
     const limit = Math.min(q.limit ?? 50, 200)
     const rows = db.prepare(`SELECT * FROM observation ${where} ORDER BY created_at ASC LIMIT ?`).all(...params, limit)

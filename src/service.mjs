@@ -119,6 +119,20 @@ export function createAcpService({ ledger, startupRebuild = true }) {
     },
 
     /**
+     * queryObservations：查蒸馏 Observation 轨（供 maid PIN 钉扎等插件取高权威画像）。
+     * 2026-09-07（maid P0-1）：此前插件误调 acp.query（不存在）导致 PIN 高权威源静默失效。
+     * @param {object} q - { scopeId?, state?, claimDomain?, authorities?: string[], limit? }
+     * @returns {{items: object[], total: number}}
+     */
+    queryObservations(q = {}) {
+      const { scopeId, state, claimDomain, authorities, limit } = q
+      const res = ledger.queryObservation({
+        scopeId, state, claimDomain, authorities, limit,
+      })
+      return { items: res.items, total: res.total }
+    },
+
+    /**
      * history：回溯证据演进历史（双视图之"当时视图"，M2 T5）。
      * 沿 supersedes 直接前驱回溯，返回 [最旧 ... 最新] 的有序 id 数组（含 id 自己）；
      * 与 getLineage(id, { ledger }) 语义一致（演进历史不冗余存储，CONTRACTS.md §1）。

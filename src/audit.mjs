@@ -25,6 +25,9 @@ export const AUDIT_OPS = Object.freeze([
   'system',
   'model_query', // S1 P1（2026-09-04）：acp_query 只读工具查询审计
   'import_memento', // PLAN-S2（2026-09-07）：memento→ACP 迁移批次审计（脚本落账，幂等重跑只记一次成功批次）
+  // E1 补录（2026-09-07 审计）：live DB 存在但枚举缺失的 op
+  'quarantine_noise',
+  'supersede_transient_observation',
 ])
 
 /** 审计行为者枚举 */
