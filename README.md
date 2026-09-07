@@ -221,6 +221,12 @@ pnpm install
 | `rebuild(viewName)` | 手动重建物化视图（视图随时可以重建） |
 | `exportActive(scopeId)` | 只导出生效中的证据（便捷方法） |
 
+## 反馈通道：纠正 → 规则（T4，0.3.0）
+
+- **草拟**：user_correction/user_explicit 证据过闸门（G1 显式前缀 `记住：/更正：/规则：`；G2 同义纠正前 24 字符重复 ≥2）→ LLM 草拟（复用 consolidation 路由，可缺失→G1 去前缀兜底）→ `rule` 表 draft 行 + audit `rule_drafted`；幂等（已入 rules 的证据不重复草拟），日限 4 run
+- **审批**：`/acp rule list | accept <n> | reject <n>`（人工/headless 通道，never 策略可用；accept → active + `~/.dsh/rules/` 视图重建 + audit）；style 候选审批在 never 策略下不自动发起（防静默 dismiss，isNeverApprovalPolicy）
+- **注入**：active 规则（≤3 条）常驻 composer `rules` 段（60 token，memory 让渡；渲染 `[acp:rule]` 标签）——≤2 行铁律每轮可见；细则留 `/acp rule list` 与账本按需查询
+- **修订**：规则修订 = 新行 supersedes 旧行（lineage 回溯）；不满足闸门的纠正维持 evidence 层按需召回
 ## 数据位置与备份
 
 - 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），六张表：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计
