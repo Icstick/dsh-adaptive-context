@@ -51,4 +51,60 @@ export function viewFileName(domain) {
   return safe ? safe + '.md' : 'rules.md'
 }
 
-export default { renderRulesView, viewFileName }
+// ===================== 写盘编排（M4.1b，2026-09-07） =====================
+// rules/ 目录 = 人类可读、git 版本化的视图（~/.dsh/rules/<domain>.md），
+// 可从 ledger 全量重建（Evidence is truth; views are rebuildable）。
+// 原子写（temp+rename）；陈旧清理只删 kind: acp-rules 标记的文件，不碰用户其他 md。
+
+import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+
+/**
+ * 把规则视图落盘到 dir（按 domain 分文件）。
+ * 1) 按 domain 分组（域排序稳定）→ renderRulesView 渲染
+ * 2) 陈旧清理：目录内 kind: acp-rules 的 .md 若不在本次域集 → 删除（防残留失效域）
+ * 3) 每文件原子写：<tmp> → rename
+ * @param {object[]} rows - rule 行（通常 queryRules({state:'active'}).items）
+ * @param {object} opts - { dir: string }（必填；生产 = config.rulesDir ?? ~/.dsh/rules）
+ * @returns {{ok: boolean, dir: string, files: string[], domains: string[], removed: number}}
+ */
+export function writeRulesDir(rows, opts = {}) {
+  const dir = String(opts.dir ?? '').trim()
+  if (!dir) throw new TypeError('writeRulesDir requires opts.dir')
+  mkdirSync(dir, { recursive: true })
+  const byDomain = new Map()
+  for (const r of rows ?? []) {
+    const d = r?.domain ?? ''
+    if (!d || !r?.text) continue
+    if (!byDomain.has(d)) byDomain.set(d, [])
+    byDomain.get(d).push(r)
+  }
+  const domains = [...byDomain.keys()].sort()
+  const names = new Set(domains.map((d) => viewFileName(d)))
+  let removed = 0
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.md') || names.has(f)) continue
+    const p = path.join(dir, f)
+    try {
+      const head = readFileSync(p, 'utf8').slice(0, 120)
+      if (head.includes('kind: acp-rules')) {
+        rmSync(p)
+        removed += 1
+      }
+    } catch { /* 读取失败不动（可能正被占用） */ }
+  }
+  const now = new Date().toISOString()
+  const written = []
+  for (const d of domains) {
+    const name = viewFileName(d)
+    const content = renderRulesView(byDomain.get(d), { domain: d, updatedAt: now })
+    const tmp = path.join(dir, '.' + name + '.' + randomUUID() + '.tmp')
+    writeFileSync(tmp, content, 'utf8')
+    renameSync(tmp, path.join(dir, name))
+    written.push(name)
+  }
+  return { ok: true, dir, files: written.sort(), domains, removed }
+}
+
+export default { renderRulesView, viewFileName, writeRulesDir }

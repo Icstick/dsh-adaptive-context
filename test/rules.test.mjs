@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { createRuleStore, ruleIdOf, RULE_STATES, RULE_TRANSITIONS } from '../src/rule.mjs'
-import { renderRulesView, viewFileName } from '../src/rules.mjs'
+import { renderRulesView, viewFileName, writeRulesDir } from '../src/rules.mjs'
 import { AUDIT_OPS } from '../src/audit.mjs'
 
 function freshLedger(t) {
@@ -132,4 +132,63 @@ test('renderRulesView：frontmatter + active/superseded 分节 + 可读性快照
   assert.ok(md.includes('## superseded / rejected'))
   assert.equal(viewFileName('workflow'), 'workflow.md')
   assert.equal(viewFileName('user_habit'), 'user_habit.md')
+})
+
+// ===================== M4.1b：writeRulesDir 写盘编排 =====================
+
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+
+test('writeRulesDir：按域分文件落盘，内容含 frontmatter 与规则', (t) => {
+  const ledger = freshLedger(t)
+  const store = createRuleStore({ db: ledger.db })
+  const w1 = store.createRule(draftInput())
+  const w2 = store.createRule(draftInput({ domain: 'habit', text: '每日收工前归档 checkpoint' }))
+  store.transitionRule(w1.row.id, 'approve')
+  store.transitionRule(w2.row.id, 'approve')
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-rules-view-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const res = writeRulesDir(store.queryRules({ state: 'active' }).items, { dir })
+  assert.deepEqual(res.domains.sort(), ['habit', 'workflow'])
+  assert.equal(res.removed, 0)
+  const wf = readFileSync(path.join(dir, 'workflow.md'), 'utf8')
+  assert.ok(wf.includes('kind: acp-rules'))
+  assert.ok(wf.includes('domain: workflow'))
+  assert.ok(wf.includes('先测试后提交'))
+  assert.equal(res.files.length, 2)
+})
+
+test('writeRulesDir：陈旧域清理（只删 kind: acp-rules 文件，用户 md 保留）', (t) => {
+  const ledger = freshLedger(t)
+  const store = createRuleStore({ db: ledger.db })
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-rules-view-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  writeFileSync(path.join(dir, 'notes.md'), '用户自己的笔记(markdown)', 'utf8')
+  const a = store.createRule(draftInput())
+  const h = store.createRule(draftInput({ domain: 'habit', text: '每日收工前归档' }))
+  store.transitionRule(a.row.id, 'approve')
+  store.transitionRule(h.row.id, 'approve')
+  writeRulesDir(store.queryRules({ state: 'active' }).items, { dir })
+  assert.ok(existsSync(path.join(dir, 'notes.md')), '非规则 md 保留')
+  // habit 域规则全部 supersede → 重建后 habit.md 被清理
+  const habit = store.queryRules({ domain: 'habit' }).items[0]
+  store.transitionRule(habit.id, 'supersede')
+  const res2 = writeRulesDir(store.queryRules({ state: 'active' }).items, { dir })
+  assert.equal(existsSync(path.join(dir, 'habit.md')), false, '失效域文件已删')
+  assert.equal(res2.removed, 1)
+  assert.ok(existsSync(path.join(dir, 'workflow.md')))
+  assert.ok(existsSync(path.join(dir, 'notes.md')))
+})
+
+test('writeRulesDir：无 active 规则 → 清空规则视图（notes 仍保留）', (t) => {
+  const ledger = freshLedger(t)
+  const store = createRuleStore({ db: ledger.db })
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-rules-view-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const a = store.createRule(draftInput())
+  writeRulesDir(store.queryRules({ state: 'active' }).items, { dir })
+  store.transitionRule(a.row.id, 'approve')
+  store.transitionRule(a.row.id, 'supersede')
+  const res = writeRulesDir(store.queryRules({ state: 'active' }).items, { dir })
+  assert.equal(res.files.length, 0)
+  assert.equal(readdirSync(dir).filter((f) => f.endsWith('.md')).length, 0)
 })

@@ -12,6 +12,7 @@
 //   turn/end       → session/event 内 event.type==='turn/end' 时入队 background consolidation
 
 import path from 'node:path'
+import { homedir as osHomedir } from 'node:os'
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
@@ -27,6 +28,7 @@ import {
   CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
 } from './constants.mjs'
 import { isActionFlowObservation } from './governance.mjs'
+import { writeRulesDir } from './rules.mjs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
@@ -87,6 +89,9 @@ export const Config = z.object({
   // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
   autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
   viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
+  // T4 M4.1b（2026-09-07）：规则视图目录（人类可读 rules/ 视图，可从 ledger 重建；
+  // 缺省 ~/.dsh/rules——跨 workspace/profile 全局）。patch/settings 级配置。
+  rulesDir: z.string(),
   // S1 P2（2026-09-04）：section quota 覆盖（如 { user_model: 800 }）。
   // 不配置 = composer 用 MVP_SECTION_QUOTA（user_model 180/…）；总预算仍由 hotTokens 控制。
   sectionQuota: z.any(),
@@ -329,6 +334,19 @@ export function apply(ctx, config = {}) {
   const ledgerDir = config.ledgerDir ?? path.join(process.env.DSH_HOME || '', 'acp')
   const ledger = openEvidenceLedger({ dir: ledgerDir })
   const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
+
+  // --- T4 M4.1b：rules/ 视图启动重建（views are rebuildable）---
+  // 从 ledger active 规则全量落盘 ~/.dsh/rules/<domain>.md；失败只 warn 不阻断插件。
+  try {
+    const rulesHome = process.env.DSH_HOME || path.join(osHomedir(), '.dsh')
+    const rulesDir = config.rulesDir ?? path.join(rulesHome, 'rules')
+    const activeRules = ledger.ruleStore.queryRules({ state: 'active', limit: 500 }).items
+    const rulesRes = writeRulesDir(activeRules, { dir: rulesDir })
+    ctx.logger?.debug?.('[acp] rules view rebuilt: files=' + rulesRes.files.length)
+  } catch (err) {
+    ctx.logger?.warn?.('[acp] acp:degraded rules_view_write_failed reason='
+      + (err instanceof Error ? err.message : String(err)))
+  }
 
   // --- M3 B3：materialized view（views are rebuildable）---
   // 视图目录缺省 ledgerDir/views；verify/rebuild 与 expression 重写同源（同 scope 投影）。
