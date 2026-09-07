@@ -40,6 +40,7 @@ export const AUDIT_ACTORS = Object.freeze([
   'agent',
   'user',
   'system',
+  'feedback', // T4 M4.2（2026-09-07）：反馈通道草拟管线写行为者
   'consolidation',
   'model', // S1 P1（2026-09-04）：模型侧工具动作（如 acp_query 读审计）
 ])

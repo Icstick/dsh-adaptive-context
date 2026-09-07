@@ -18,6 +18,7 @@ import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 import { isNeverApprovalPolicy } from './expression.mjs'
+import { maybeDraft } from './feedback.mjs'
 import { makeAcpQueryTool } from './tools.mjs'
 import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
@@ -507,6 +508,9 @@ export function apply(ctx, config = {}) {
       // turn/end：入队 background consolidation（fire-and-forget，不 await）
       if (event?.type === 'turn/end') {
         consolidate.enqueue()
+        // T4 M4.2：反馈通道草拟（独立日限节流；幂等——已入 rules 的证据不再草拟）
+        void maybeDraft(ledger, { llmCall: buildLlmCall(), logger: ctx.logger })
+          .catch((err) => ctx.logger?.warn?.('[acp] feedback draft run failed: ' + (err instanceof Error ? err.message : String(err))))
         return
       }
       if (!isEvidenceWorthy(event)) return
