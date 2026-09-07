@@ -187,6 +187,7 @@ pnpm install
 | `consolidationTimeoutMs` | number | 30000 | 提炼调用超时 |
 | `autoPromote` | boolean | false | 风格候选策略达标后自动晋升（默认关，走人工审批门） |
 | `viewsDir` | string | ledgerDir/views | 物化视图目录 |
+| `rulesDir` | string | ~/.dsh/rules | 规则视图目录（T4 M4.1：反馈通道规则的人类可读视图，按域分文件、可从 ledger 重建；跨 workspace/profile 全局） |
 | `policyConfig` | object | — | promotion 策略参数覆盖（floors 只允许更严：min_events 最低 2、min_strong 最低 1、证据窗口最长 30 天） |
 | `startupRebuild` | boolean | true | 启动时校验视图 checksum，失配自动重建 |
 | `crossSessionPolicy` | enum | non-instructional | 跨会话注入闸门（2026-08-30）：`non-instructional`=跨会话只注入非指令性内容（agent_authored 总结/external_tool），user_input/user_correction 跨会话不注入；`all`=跨会话全类别注入（utility×0.3 惩罚 + session 来源标记）；`none`=不注入任何跨会话内容。本会话内容始终全类别注入 |
@@ -222,8 +223,9 @@ pnpm install
 
 ## 数据位置与备份
 
-- 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），五张表：证据 / 观察 / 候选 / 候选事件 / 审计
+- 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），六张表：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计
 - 物化视图在 `ledgerDir/views/` 下，可随时重建（带校验和）
+- 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）
 - **备份/迁移**：导出（JSONL）→ 新环境导入，按内容哈希幂等合并
 - **数据是你的**：卸载插件不会删数据；装回来即恢复
 
