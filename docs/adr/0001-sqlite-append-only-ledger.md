@@ -11,7 +11,7 @@
 - evidence 表只插入；「删除」以状态表达（superseded / quarantined），绝不物理删除已写证据；
 - observation / 视图（user_model、style、experience 等）全部可重建（rebuild.mjs），不入库为不可变事实；
 - 审计三链（写/读/consolidation）独立落账；
-- 事实源与 dsh-memento 并存互不迁移（各管各的）。
+- 事实源与 dsh-memento 并存互不迁移（各管各的）。**【过渡态】**：memento fade-out 定案（2026-09-04 unified-memory-seam-design D2/S2）——目标态 ACP 单轨，memento/shared-memory/meow 退役；迁移脚本 scripts/migrate-memento.mjs 就绪（dry-run/backup/run，幂等），S2 执行待排期
 
 ## 后果
 - 备份 = 文件复制；重建工具保证视图可信；

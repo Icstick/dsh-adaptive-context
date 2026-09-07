@@ -353,6 +353,7 @@ export function apply(ctx, config = {}) {
       ledgerDir: z.string(),
       hotTokens: z.number().step(1).min(1),
       observationInjection: z.boolean(),
+      observationAuthorities: z.array(z.string()), // T2：注入权威白名单（UI 逗号分隔文本写入）
       recallLimit: z.number().step(1).min(1),
       // deprecated：读侧已按候选自身 claimDomain 分组，不再影响注入（保留键位兼容）
       targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),

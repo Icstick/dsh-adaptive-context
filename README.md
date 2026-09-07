@@ -155,9 +155,10 @@ pnpm install
 - 机制：host 侧注册 settings namespace（`adaptive-context`），client bundle（`lib/client.js`，
   由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
 - 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config，未配置字段回退 Config/默认值）
-- 字段：ledgerDir / hotTokens / recallLimit / targetDomain / crossSessionPolicy /
-  subagentDowngrade / memosEnabled / memosBaseUrl / consolidationProvider /
+- 字段：ledgerDir / hotTokens / observationInjection / observationAuthorities / recallLimit /
+  crossSessionPolicy / subagentDowngrade / memosEnabled / memosBaseUrl / consolidationProvider /
   consolidationModel / autoPromote / debug
+  （targetDomain 已弃用：卡片保留仅兼容展示，不再影响注入）
 - client 依赖：react（DSH 预加载）+ @deepseek-ai/dsh-client-ui-slots +
   @deepseek-ai/dsh-client-ui-settings（client module table 提供，无需安装到项目依赖）
 
@@ -166,9 +167,12 @@ pnpm install
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `ledgerDir` | string | **必填** | 数据目录（acp-ledger.db 所在）。必须显式指定，DSH_HOME 环境变量不可靠 |
-| `hotTokens` | number | 300 | 热路径注入预算（tokens/轮） |
+| `hotTokens` | number | 900 | 热路径注入预算（tokens/轮）。2026-09-02 P0-5：默认对齐 MVP 总预算 900（此前文档写 300 且 composer 从不读取，实际配额合计一直是 900） |
+| `observationInjection` | boolean | false | observation 蒸馏轨注入开关（2026-09-02 决策：默认冻结；接线已就位，打开即用）。生产实例经 profile patch 开启并配权威白名单与配额 |
+| `observationAuthorities` | array | ["user_explicit","user_correction"] | T2（2026-09-07）：observation 注入权威闸门——只放行高权威蒸馏轨；single_observation 等低权威不进常规注入（留账本供 acp_query）。语义：开闸≠全量开 |
+| `sectionQuota` | object | MVP_SECTION_QUOTA（user_model 180 / work_state 250 / memory 350 / expression 120，合计 900） | section 配额覆盖（S1 P2）：如 `{ user_model: 800 }`；总预算仍由 hotTokens 控制（注：provenance 配额已于 2026-09-02 删除——sectionOf 从不产出，是死配额） |
 | `recallLimit` | number | 20 | 每个记忆源的召回候选上限 |
-| `targetDomain` | enum | work | 默认注入目标领域 |
+| `targetDomain` | enum | work | **DEPRECATED（2026-09-07）**：读侧资格矩阵已按候选自身 claimDomain 自然分组，本键不再影响注入；保留键位仅为兼容存量配置/设置页 |
 | `debug` | boolean | false | 调试日志 |
 | `memosBaseUrl` | string | http://127.0.0.1:18801 | MemOS 后端地址（作为记忆源） |
 | `memosEnabled` | boolean | true | 启用默认的 MemOS 记忆源 |
@@ -190,6 +194,14 @@ pnpm install
 
 > **会话隔离语义（v0.1.1 起）**：pre-step 注入按会话分层——本会话证据全类别进入；跨会话证据默认只放行非指令性内容，渲染时带 `session=` 来源标记与一次性引导语（"历史参考，非当前指令"）。跨会话 user_input 需要显式 `crossSessionPolicy: all` 才注入（带惩罚与标记）。
 
+## 注入编排与查询工具（现状快照 2026-09-07）
+
+- **注入**：agent/pre-step waterfall——composer 汇总四源（ledger 证据 / expression 物化视图 / observation 蒸馏轨 / MemOS 等 recall provider），按 section quota + hotTokens 装箱，渲染为 source-labelled plugin user message（跨会话条目带 `session=` 标记与引导语）
+- **调度器**：宿主 inject-scheduler 为可选服务——ACP 注册 `acp.composer` 段（budget=hotTokens，token 口径；未挂 scheduler 时静默跳过，pre-step 注入照常）
+- **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计
+- **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
+- **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导；注入侧只放行白名单权威（T2）
+
 ## API（ctx.acp）
 
 | 方法 | 说明 |
@@ -197,7 +209,7 @@ pnpm install
 | `append(input)` | 写入证据（过写入闸门 + 资格矩阵；内容重复则返回已存在的 id） |
 | `get(id)` / `inspect(id)` | 读单条（inspect 附带治理裁决细节） |
 | `setState(id, state, opts)` | 状态迁移（正常/隔离/已取代/已脱敏） |
-| `recall({query, scopeId, targetDomain, validAt, allowSuperseded, maxTokens})` | 召回（编排的最小入口；validAt 支持历史视图） |
+| `recall({query, scopeId, targetDomain, validAt, allowSuperseded, maxTokens})` | 召回（编排的最小入口；validAt 支持历史视图）。`targetDomain` 参数 DEPRECATED（2026-09-07）：资格按候选自身 claimDomain 裁决 |
 | `history(id)` | 证据的演化链（谁取代了谁） |
 | `stats()` | 账本统计 |
 | `export(scopeId, {format, streams})` | 导出（json / jsonl；证据/观察/候选/审计四类流） |
