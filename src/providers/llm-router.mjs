@@ -32,6 +32,10 @@ export async function callLlmText(llm, route, userText, system) {
   const model = route?.model
   const maxTokens = route?.maxTokens ?? DEFAULT_MAX_TOKENS
   const timeoutMs = route?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  // P3 修复（2026-09-07）：机械提炼任务默认关闭 thinking——deepseek 系默认
+  // reasoningEffort=high，思考输出与正文共用 maxTokens 预算（12288），实测可被
+  // 长思考吃满导致 finish=length 连败（2026-09-06 22:30 实例）；路由可覆盖。
+  const reasoningEffort = route.reasoningEffort ?? 'off'
   const messages = [createUserMessage({
     content: [{ type: 'text', text: userText }],
     source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'consolidation' },
@@ -46,6 +50,7 @@ export async function callLlmText(llm, route, userText, system) {
       messages,
       system,
       maxTokens,
+      reasoningEffort,
       temperature: 0,
       signal: controller.signal,
       purpose: 'compaction', // GenerateOptions 联合类型只有 compaction|session-title
