@@ -28,7 +28,12 @@ function recordingLlm(streamImpl) {
   return {
     calls,
     stream(options) {
-      calls.push({ provider: options.provider, model: options.model, purpose: options.purpose })
+      calls.push({
+        provider: options.provider,
+        model: options.model,
+        purpose: options.purpose,
+        reasoningEffort: options.reasoningEffort,
+      })
       return streamImpl()
     },
   }
@@ -65,6 +70,18 @@ test('主路由成功：callFor 返回文本，llm.stream 收到正确路由参�
   assert.equal(llm.calls[0].provider, 'deepseek')
   assert.equal(llm.calls[0].model, 'chat')
   assert.equal(llm.calls[0].purpose, 'compaction') // GenerateOptions 联合类型约束
+  assert.equal(llm.calls[0].reasoningEffort, 'off', '机械任务默认关闭 thinking（P3 防线）')
+})
+
+test('路由可覆盖 reasoningEffort（如显式开启思考）', async () => {
+  const llm = recordingLlm(() => okStream('{"observations":[]}'))
+  const router = createLlmRouter({
+    tasks: { consolidation: { provider: 'deepseek', model: 'chat', reasoningEffort: 'low' } },
+    resolveLlm: () => llm,
+  })
+  await router.callFor('consolidation', 'u', 's')
+  assert.equal(llm.calls.length, 1)
+  assert.equal(llm.calls[0].reasoningEffort, 'low')
 })
 
 test('fallback 链：主路由抛错 → fallback 成功', async () => {

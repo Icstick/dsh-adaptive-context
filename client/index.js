@@ -1,9 +1,10 @@
-// client/index.js — dsh-adaptive-context 设置页卡片（bundle-ready CJS 风格源码）。
+// client/index.js — dsh-adaptive-context 设置页（bundle-ready CJS 风格源码）。
 //
-// 构建：node client/build.mjs → lib/client.js（window.__ModuleLoader__.load 闭包）。
+// 构建：node scripts/build-client.mjs → lib/client.js（window.__ModuleLoader__.load 闭包）。
 // dsh.client.inject 声明包关系；Cordis 服务依赖由下方 exports.inject 声明并控制激活。
 // react 由平台预加载，ui-slots 提供 ctx.slots，ui-settings 提供 ctx.settingsScope。
-// 自包含：不依赖 ui-settings-plugins 私有表单，字段渲染 + staged 草稿 + 保存自实现。
+// 自包含：字段渲染 + staged 草稿 + 保存自实现。
+// 注册为设置面板顶层 section（settings.section「自适应上下文」，与费用/Vision Router 同层）。
 // 文案写死中文（v1 不做 i18n）。
 
 // React 无顶层 h（那是 preact 的 API）——createElement 起别名 h 供组件使用
@@ -12,7 +13,7 @@ const { createElement: h, useState, useSyncExternalStore } = require('react')
 /** 设置页 namespace（与 host 侧 SETTINGS_NAMESPACE 一致） */
 const NS = 'adaptive-context'
 
-/** 卡片标题/描述 */
+/** 顶层 section 标题/描述 */
 const TITLE = '自适应上下文（ACP）'
 const DESC = '证据账本 · 上下文注入 · 会话隔离'
 
@@ -73,7 +74,7 @@ const hintStyle = { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #
 const inputStyle = {
   fontSize: '13px', padding: '4px 8px', borderRadius: '6px',
   border: '1px solid var(--dsw-alias-border-l2, #d1d5db)',
-  background: 'var(--dsw-alias-field-bg, #fff)', color: 'var(--dsw-alias-label-primary, #111827)',
+  background: 'var(--dsw-alias-bg-module-platform)', color: 'var(--dsw-alias-label-primary, #111827)',
 }
 const badgeStyle = {
   fontSize: '11px', color: '#b45309', background: '#fef3c7',
@@ -128,11 +129,11 @@ function FieldControl(p) {
 }
 
 /**
- * 设置卡片组件（自包含：闭包捕获 bound scope）。
+ * 设置 section 面板组件（自包含：闭包捕获 bound scope）。
  * @param {object} scope - ctx.settingsScope.bind({namespace}) 结果
  */
-function makeCard(scope) {
-  return function Card() {
+function makeSection(scope) {
+  return function Section() {
     const snapshot = useSyncExternalStore(
       (cb) => scope.subscribe(cb),
       () => scope.getSnapshot(),
@@ -141,7 +142,6 @@ function makeCard(scope) {
     const userLayer = snapshot?.user && typeof snapshot.user === 'object' ? snapshot.user : {}
     const writable = snapshot?.writable === true
     const [drafts, setDrafts] = useState(null) // null=无编辑；{name: text}
-    const [open, setOpen] = useState(false)
     const [saving, setSaving] = useState(false)
     const [failed, setFailed] = useState(false)
 
@@ -188,22 +188,12 @@ function makeCard(scope) {
       })
     }
 
-    const headerStyle = {
-      display: 'flex', alignItems: 'center', gap: '8px', width: '100%',
-      background: 'none', border: 'none', cursor: 'pointer', padding: '12px 4px',
-      textAlign: 'left', font: 'inherit',
-    }
-    return h('li', { style: { listStyle: 'none' } },
-      h('button', {
-        type: 'button', style: headerStyle, 'aria-expanded': open,
-        'aria-label': (open ? '收起设置: ' : '展开设置: ') + TITLE,
-        onClick: () => setOpen(!open),
-      },
-        h('span', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--dsw-alias-label-primary, #111827)' } }, TITLE),
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
+      h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', padding: '2px 2px 10px', borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)' } },
+        h('span', { style: { fontWeight: 600, fontSize: '15px', color: 'var(--dsw-alias-label-primary, #111827)' } }, TITLE),
         h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #6b7280)' } }, DESC),
-        dirty ? h('span', { style: badgeStyle }, '未保存') : null,
-        h('span', { style: { marginLeft: 'auto', transform: open ? 'rotate(180deg)' : 'none' } }, '▾')),
-      open ? h('div', { style: { padding: '0 4px 12px' } },
+        dirty ? h('span', { style: badgeStyle }, '未保存') : null),
+      h('div', { style: { padding: '2px 2px 8px' } },
         !writable ? h('p', { role: 'status', style: hintStyle }, '当前文档不可写（只读模式）') : null,
         FIELDS.map((field) => h(FieldControl, {
           key: field.name,
@@ -230,16 +220,16 @@ function makeCard(scope) {
             },
             onClick: save,
           }, saving ? '保存中…' : '保存')))
-        : null)
+    )
   }
 }
 
-/** client 插件入口：注册设置卡片（keyed by namespace）。 */
+/** client 插件入口：注册为设置面板顶层 section。 */
 function apply(ctx) {
   const scope = ctx.settingsScope.bind({ namespace: NS })
-  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-    { name: 'settings.plugin.item', key: NS },
-    makeCard(scope),
+  ctx.slots.inject('settings.section', () => ctx.slots.register(
+    { name: 'settings.section', id: 'adaptive-context', order: 165, label: '自适应上下文' },
+    makeSection(scope),
   ))
 }
 
