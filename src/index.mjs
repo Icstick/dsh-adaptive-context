@@ -337,18 +337,23 @@ export function apply(ctx, config = {}) {
   const ledger = openEvidenceLedger({ dir: ledgerDir })
   const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
 
-  // --- T4 M4.1b：rules/ 视图启动重建（views are rebuildable）---
-  // 从 ledger active 规则全量落盘 ~/.dsh/rules/<domain>.md；失败只 warn 不阻断插件。
-  try {
-    const rulesHome = process.env.DSH_HOME || path.join(osHomedir(), '.dsh')
-    const rulesDir = config.rulesDir ?? path.join(rulesHome, 'rules')
-    const activeRules = ledger.ruleStore.queryRules({ state: 'active', limit: 500 }).items
-    const rulesRes = writeRulesDir(activeRules, { dir: rulesDir })
-    ctx.logger?.debug?.('[acp] rules view rebuilt: files=' + rulesRes.files.length)
-  } catch (err) {
-    ctx.logger?.warn?.('[acp] acp:degraded rules_view_write_failed reason='
-      + (err instanceof Error ? err.message : String(err)))
+  // --- T4 M4.1b：rules/ 视图重建闭包（views are rebuildable）---
+  // 启动全量重建 + /acp rule accept 后刷新共用；失败只 warn 不阻断插件。
+  const rulesDir = config.rulesDir
+    ?? path.join(process.env.DSH_HOME || path.join(osHomedir(), '.dsh'), 'rules')
+  function refreshRulesView() {
+    try {
+      const activeRules = ledger.ruleStore.queryRules({ state: 'active', limit: 500 }).items
+      const rulesRes = writeRulesDir(activeRules, { dir: rulesDir })
+      ctx.logger?.debug?.('[acp] rules view rebuilt: files=' + rulesRes.files.length)
+      return true
+    } catch (err) {
+      ctx.logger?.warn?.('[acp] acp:degraded rules_view_write_failed reason='
+        + (err instanceof Error ? err.message : String(err)))
+      return false
+    }
   }
+  refreshRulesView()
 
   // --- M3 B3：materialized view（views are rebuildable）---
   // 视图目录缺省 ledgerDir/views；verify/rebuild 与 expression 重写同源（同 scope 投影）。
@@ -411,6 +416,9 @@ export function apply(ctx, config = {}) {
   } catch (err) {
     ctx.logger?.warn?.('[acp] acp_query register failed: ' + (err && err.message))
   }
+
+  // --- T4 M4.3：/acp rule review 命令（人工/headless 审批通道；可选服务）---
+  registerRuleReviewCommand(ctx, ledger, refreshRulesView)
 
   // --- M3 C3：启动校验（views are rebuildable）---
   // verifyView 失配且 startupRebuild=true → 自动重建（含首启未构建视图的首次物化）；
@@ -677,5 +685,107 @@ export function apply(ctx, config = {}) {
     consolidate.awaitIdle()
       .then(() => { clearTimeout(timer); closeLedger() })
       .catch(() => { clearTimeout(timer); closeLedger() })
+  })
+}
+
+// ===================== T4 M4.3：/acp rule review 命令（2026-09-07） =====================
+// 规则草案审批的人工/headless 通道（approval seam 自动发起后续接；never 策略可用）。
+// 语义：accept = transitionRule approve（→active + 视图刷新 + audit rule_approved）；
+//       reject = transitionRule reject（→终态 + audit rule_rejected）。
+// 命令仅 draft 序号的 list 段操作（序号 1..N 对应草案列表顺序）。
+
+export const RULE_CMD_USAGE = [
+  'Usage: /acp rule <verb> [args]',
+  '  list              列出规则草案（draft，可审批）',
+  '  accept <n>        审批通过第 n 条草案（→ active，视图重建 + 审计）',
+  '  reject <n>        拒绝第 n 条草案（→ rejected + 审计）',
+  '示例：/acp rule list → /acp rule accept 1',
+].join('\n')
+
+/** 渲染规则列表（draft 序号可操作；active 附后参考） */
+export function renderRuleList(ruleStore, opts = {}) {
+  const draft = ruleStore.queryRules({ state: 'draft', limit: 50 }).items
+  const active = ruleStore.queryRules({ state: 'active', limit: 10 }).items
+  const lines = []
+  if (draft.length === 0 && active.length === 0) {
+    return '（无规则草案/生效规则——纠正会经草拟管线成为草案，见 /acp rule list）'
+  }
+  if (draft.length > 0) {
+    lines.push('[draft] ' + draft.length + ' 条（accept/reject 按此序号）')
+    draft.forEach((r, i) => {
+      lines.push('  ' + (i + 1) + '. [' + r.domain + '] ' + (r.title || '（无标题）'))
+      lines.push('     gates=' + (r.gates.join(',') || '-') + ' | ' + String(r.text).slice(0, 80))
+    })
+  }
+  if (active.length > 0) {
+    lines.push('[active] ' + active.length + ' 条生效')
+    active.forEach((r) => {
+      lines.push('  · [' + r.domain + '] ' + (r.title || String(r.text).slice(0, 24)) + '（since ' + new Date(r.activeFrom ?? r.createdAt).toISOString().slice(0, 10) + '）')
+    })
+  }
+  return lines.join('\n')
+}
+
+/** /acp rule 处理器（纯函数化，供测试直调）。返回 {kind:'success'|'error', text}。 */
+export function handleRuleReviewCommand(ruleStore, auditStore, rawInput, opts = {}) {
+  const text = String(rawInput ?? '').trim()
+  const [head, sub, ...rest] = text.split(/\s+/)
+  if (head !== 'rule') return { kind: 'success', text: RULE_CMD_USAGE }
+  const arg = rest.join(' ').trim()
+  const actor = opts.actor ?? 'user'
+  if (!sub || sub === 'list') return { kind: 'success', text: renderRuleList(ruleStore) }
+  const n = Number.parseInt(arg, 10)
+  if (sub === 'accept' || sub === 'reject') {
+    if (!Number.isInteger(n) || n < 1) {
+      return { kind: 'error', text: '/acp rule ' + sub + ' <n>：需要草案列表序号' }
+    }
+    const { items } = ruleStore.queryRules({ state: 'draft', limit: 50 })
+    const target = items[n - 1]
+    if (!target) {
+      return { kind: 'error', text: '草案 #' + n + ' 不存在（当前 ' + items.length + ' 条）' }
+    }
+    const event = sub === 'accept' ? 'approve' : 'reject'
+    const row = ruleStore.transitionRule(target.id, event)
+    try {
+      auditStore?.appendAudit?.({
+        op: event === 'approve' ? 'rule_approved' : 'rule_rejected',
+        targetId: target.id,
+        scopeId: row.scopeId,
+        actor,
+        reason: '/acp rule ' + sub,
+        payload: { domain: row.domain, gates: row.gates, title: row.title },
+      })
+    } catch (err) {
+      opts.logger?.warn?.('[acp] rule review audit failed: ' + (err instanceof Error ? err.message : String(err)))
+    }
+    opts.onChanged?.()
+    return { kind: 'success', text: 'rule ' + sub + ' → ' + row.state + '：' + (row.title || String(row.text).slice(0, 30)) }
+  }
+  return { kind: 'success', text: RULE_CMD_USAGE }
+}
+
+/** /acp 命令注册（commands 可选服务，缺失等待就绪——WC 同款模式） */
+export function registerRuleReviewCommand(ctx, ledger, onChanged) {
+  withService(ctx, 'commands', (commands) => {
+    if (!commands || typeof commands.register !== 'function') return
+    commands.register({
+      name: 'acp',
+      description: 'ACP 规则草案审批（list/accept/reject）',
+      input: { hint: '/acp rule list | /acp rule accept <n> | /acp rule reject <n>' },
+      handler: async (invocation) => {
+        try {
+          return handleRuleReviewCommand(
+            ledger.ruleStore,
+            ledger.auditStore,
+            String(invocation?.rawInput ?? '').trim(),
+            { onChanged, logger: ctx.logger },
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return { kind: 'error', text: 'acp error: ' + message }
+        }
+      },
+    })
+    ctx.logger?.info?.('[acp] /acp rule command registered')
   })
 }
