@@ -18,6 +18,7 @@ test('plugin config validates defaults through Standard Schema', async () => {
       startupRebuild: true,
       autoPromote: false,
       observationInjection: false, // 2026-09-02：observation 注入已接线但默认冻结
+      observationAuthorities: ['user_explicit', 'user_correction'], // T2 2026-09-07：权威闸门白名单
     },
   })
 })

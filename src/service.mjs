@@ -125,9 +125,9 @@ export function createAcpService({ ledger, startupRebuild = true }) {
      * @returns {{items: object[], total: number}}
      */
     queryObservations(q = {}) {
-      const { scopeId, state, claimDomain, authorities, limit } = q
+      const { scopeId, state, claimDomain, authorities, limit, order } = q
       const res = ledger.queryObservation({
-        scopeId, state, claimDomain, authorities, limit,
+        scopeId, state, claimDomain, authorities, limit, order,
       })
       return { items: res.items, total: res.total }
     },

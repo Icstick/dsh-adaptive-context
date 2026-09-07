@@ -41,6 +41,10 @@ export const Config = z.object({
    *  先冻结、修好失败吞批止血，两个月内无消费场景则删表与 consolidate 模块）。
    *  接线已就位，打开即用，无需改代码。 */
   observationInjection: z.boolean().default(false),
+  // T2（2026-09-07）：observation 注入权威闸门——只放行高权威蒸馏轨
+  // （user_explicit/user_correction 源）；single_observation 等低权威不进常规注入（留账本供 acp_query）。
+  // 语义：开闸不是全量开——先让"你的纠正/明确偏好"稳定可达，再观察是否需要放宽。
+  observationAuthorities: z.array(z.string()).default(['user_explicit', 'user_correction']),
   recallLimit: z.number().step(1).min(1).default(20),
   // DEPRECATED（2026-09-07，PLAN-S2 P3）：读侧矩阵列已按候选自身 claimDomain 自然分组，
   // 本键不再影响注入（保留键位仅为兼容存量配置/settings 页；新语义无需配置）。
@@ -542,8 +546,15 @@ export function apply(ctx, config = {}) {
       let observationCandidates = []
       if (config.observationInjection === true) {
         try {
-          const rows = typeof ledger.listObservations === 'function' ? ledger.listObservations(scopeId) : []
-          observationCandidates = rows
+          // T2（2026-09-07）：权威闸门——queryObservation 按 authorities 过滤，不再全表 listObservations(scopeId) 每轮拉取全部 active observation（1729+ 条含大量 single_observation 噪声）
+          const authorities = Array.isArray(config.observationAuthorities) && config.observationAuthorities.length > 0
+            ? config.observationAuthorities
+            : ['user_explicit', 'user_correction']
+          const q = typeof ledger.queryObservation === 'function'
+            ? ledger.queryObservation({ scopeId, state: 'active', authorities, limit: 100, order: 'desc' })
+            : null
+          const rows = q ? q.items : (typeof ledger.listObservations === 'function' ? ledger.listObservations(scopeId) : [])
+          observationCandidates = (Array.isArray(rows) ? rows : [])
             .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
             .map((o) => observationToCandidate(o, scopeId))
         } catch (err) {

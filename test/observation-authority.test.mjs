@@ -205,3 +205,37 @@ test('queryObservations：state 过滤生效（冲突翻转产生 superseded）'
   assert.equal(old.total, 1)
   assert.equal(old.items[0].id, 'obs_v1')
 })
+
+test('queryObservation：order desc 最新在前（T2 注入用）', (t) => {
+  const ledger = freshLedger(t)
+  const svc = createAcpService({ ledger })
+  for (let i = 1; i <= 3; i++) {
+    ledger.upsertObservation({
+      id: 'obs_order_' + i, scopeId: 'user-global', subject: 's' + i, predicate: 'p', claimDomain: 'user_fact',
+      text: '第' + i + '条', evidenceIds: [], supersedes: [], state: 'active',
+      observedAt: new Date(Date.now() + i * 60000).toISOString(), authority: 'user_explicit',
+    })
+  }
+  const asc = svc.queryObservations({ scopeId: 'user-global', authorities: ['user_explicit'], limit: 10 })
+  assert.equal(asc.items[0].id, 'obs_order_1')
+  const desc = svc.queryObservations({ scopeId: 'user-global', authorities: ['user_explicit'], limit: 10, order: 'desc' })
+  assert.equal(desc.items[0].id, 'obs_order_3', 'desc 应最新在前')
+  assert.equal(desc.total, 3)
+})
+
+test('queryObservation：authorities 白名单过滤混合轨（T2 权威闸门语义）', (t) => {
+  const ledger = freshLedger(t)
+  const svc = createAcpService({ ledger })
+  const mk = (id, authority, text) => ledger.upsertObservation({
+    id, scopeId: 'user-global', subject: id, predicate: 'p', claimDomain: 'user_fact',
+    text, evidenceIds: [], supersedes: [], state: 'active', observedAt: Date.now(), createdAt: Date.now(), authority,
+  })
+  mk('obs_gate_hi1', 'user_explicit', '必须用 pnpm')
+  mk('obs_gate_hi2', 'user_correction', '不要用 yarn')
+  mk('obs_gate_lo1', 'single_observation', '用户 处于：工作')
+  mk('obs_gate_lo2', 'agent_inference', '我猜用户喜欢 bun')
+  const gate = svc.queryObservations({ scopeId: 'user-global', authorities: ['user_explicit', 'user_correction'], limit: 10 })
+  assert.equal(gate.total, 2, '闸门只放行高权威')
+  const all = svc.queryObservations({ scopeId: 'user-global', limit: 10 })
+  assert.equal(all.total, 4, '无闸门全量')
+})

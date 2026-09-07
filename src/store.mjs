@@ -525,7 +525,8 @@ export function openEvidenceLedger(opts = {}) {
     }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
     const limit = Math.min(q.limit ?? 50, 200)
-    const rows = db.prepare(`SELECT * FROM observation ${where} ORDER BY created_at ASC LIMIT ?`).all(...params, limit)
+    const orderDir = q.order === 'desc' ? 'DESC' : 'ASC'
+    const rows = db.prepare('SELECT * FROM observation ' + where + ' ORDER BY observed_at ' + orderDir + ', id ' + orderDir + ' LIMIT ?').all(...params, limit)
     const total = db.prepare(`SELECT COUNT(*) AS c FROM observation ${where}`).get(...params).c
     return { items: rows.map(toObservation), total }
   }

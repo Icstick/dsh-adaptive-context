@@ -76,7 +76,15 @@ export function isEvidenceWorthy(event) {
   const text = extractText(event)
   if (isSystemInjected(text)) return false
   if (isCompactionCheckpoint(event)) return false // 压缩重建消息非用户输入（2026-09-03 防御）
-  if (type === 'agent/inbox/spliced') return !!text
+  if (type === 'agent/inbox/spliced') {
+    // E2（2026-09-07 审计 T3）：assistant 输出经 inbox 派发时 inserted[0].source.kind==='assistant'。
+    // 模型输出不是"证据"——agent 自产内容全量入账曾致 5200+/6062 条（85.8%）账本噪声。
+    // 经验沉淀走：用户确认 → user 消息；或 turn/end → consolidation（候选蒸馏）。
+    // assistant 消息在此不摄入（保守：宁可少记 agent 自述，不污染 user 轨与蒸馏输入）。
+    const kind = event?.data?.inserted?.[0]?.source?.kind ?? ''
+    if (kind === 'assistant' || kind === 'agent' || kind === 'plugin') return false
+    return !!text
+  }
   return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!text
 }
 

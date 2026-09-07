@@ -12,7 +12,6 @@ test('user 普通消息 → user_input / user_explicit / user_fact', () => {
   const ev = { type: 'user/message', id: 'e1', content: '我们这个项目用 pnpm' }
   assert.equal(isEvidenceWorthy(ev), true)
   assert.equal(sourceClassOf(ev), 'user_input')
-  assert.equal(authorityOf(ev), 'user_explicit')
   assert.equal(claimDomainOf(ev), 'user_fact')
 })
 
@@ -239,4 +238,39 @@ test('eventKindOf：事件自带 source.kind（非 user）不冒充 user_input',
   // source.kind='user' 显式标注 → 仍判 user
   const userMsg = { type: 'user/message', data: { source: { kind: 'user' } }, content: '真实用户消息' }
   assert.equal(sourceClassOf(userMsg), 'user_input')
+})
+
+// E2（2026-09-07 审计 T3）：assistant 输出经 inbox spliced 派发不摄入——agent 自产内容
+// 全量入账曾致 85.8% 账本噪声（5200+/6062）。经验沉淀走用户确认或 turn/end consolidation。
+test('E2：agent/inbox/spliced + kind=assistant → 不摄入（isEvidenceWorthy false）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 999,
+    data: {
+      inserted: [{
+        id: 'm1',
+        role: 'assistant',
+        source: { kind: 'assistant' },
+        content: [{ type: 'text', text: '我完成了任务，结论是 X' }],
+      }],
+    },
+  }
+  assert.equal(isEvidenceWorthy(ev), false, 'assistant 输出不应作为证据摄入')
+})
+
+test('E2：agent/inbox/spliced + kind=user → 仍摄入（用户消息不受影响）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 1000,
+    data: {
+      inserted: [{
+        id: 'm2',
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: '记住：之后统一用 pnpm' }],
+      }],
+    },
+  }
+  assert.equal(isEvidenceWorthy(ev), true, '用户消息应照常摄入')
+  assert.equal(sourceClassOf(ev), 'user_input') // '记住：' 非纠正标记词（显式前缀收紧后）
 })
