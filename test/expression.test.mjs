@@ -15,6 +15,7 @@ import {
   createExpression,
   buildPromotionRequest,
   collectPendingPromotions,
+  isNeverApprovalPolicy,
   PENDING_PROMOTION,
   PROMOTION_TOOL_NAME,
   REVIEW_STATUSES,
@@ -145,6 +146,29 @@ test('requestPromotion：未知 outcome（如 unavailable）→ 不改 reviewSta
   const res = await expression.requestPromotion({ id: ev.id, content: ev.content }, mockCtx(approval), mockAgent())
   assert.equal(res, null)
   assert.equal(ledger.getById(ev.id).metadata.reviewStatus, undefined)
+})
+
+// ── M4.3 前置（2026-09-07）：never 策略防护（isNeverApprovalPolicy）──
+
+test('isNeverApprovalPolicy：会话 override=never → true（即使部署默认 ask）', () => {
+  const approval = { overrideOf: () => 'never', config: { policy: 'ask' } }
+  assert.equal(isNeverApprovalPolicy(mockCtx(approval), { id: 'session-1' }), true)
+})
+
+test('isNeverApprovalPolicy：无 override + config.policy=never → true（部署默认）', () => {
+  const approval = { overrideOf: () => undefined, config: { policy: 'never' } }
+  assert.equal(isNeverApprovalPolicy(mockCtx(approval), null), true)
+})
+
+test('isNeverApprovalPolicy：ask / 无 override 无 config → false（正常发起）', () => {
+  assert.equal(isNeverApprovalPolicy(mockCtx({ overrideOf: () => 'ask', config: {} }), {}), false)
+  assert.equal(isNeverApprovalPolicy(mockCtx({ overrideOf: () => undefined, config: {} }), {}), false)
+})
+
+test('isNeverApprovalPolicy：服务缺失/内省抛错 → false（fail-open，不误伤正常路径）', () => {
+  assert.equal(isNeverApprovalPolicy(mockCtx(null), {}), false)
+  const boom = { overrideOf: () => { throw new Error('x') } }
+  assert.equal(isNeverApprovalPolicy(mockCtx(boom), {}), false)
 })
 
 // ── oracle 3：approval 不可用 → 静默跳过 ───────────────────────────────────

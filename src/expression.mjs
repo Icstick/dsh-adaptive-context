@@ -265,6 +265,32 @@ export function rollbackCandidate(candidateStore, auditStore, views, ledger, can
 }
 
 /**
+ * M4.3 前置（2026-09-07，T4 Q3(a)）：当前会话 approval 策略是否 never。
+ * 官方语义（dsh-user-approval）：never 下每个 ask 确定性返回 'rejected'——
+ * 自动发起审批 = 把 pending style 候选静默 dismiss（审计发现，2026-09-07）。
+ * 判据：approval.overrideOf(session)（会话 override）→ approval.config.policy（部署默认）→ 'ask'。
+ * 内省失败/服务缺失 → false（fail-open：维持原发起行为；requestPromotionImpl 无 approval 时自身跳过）。
+ */
+export function isNeverApprovalPolicy(ctx, session) {
+  try {
+    const approval = typeof ctx?.get === 'function' ? ctx.get('approval') : undefined
+    if (!approval) return false
+    let policy = null
+    if (session && typeof approval.overrideOf === 'function') {
+      const o = approval.overrideOf(session)
+      if (o === 'never' || o === 'ask') policy = o
+    }
+    if (policy === null) {
+      const cfgPolicy = approval?.config?.policy
+      if (cfgPolicy === 'never' || cfgPolicy === 'ask') policy = cfgPolicy
+    }
+    return policy === 'never'
+  } catch {
+    return false
+  }
+}
+
+/**
  * 发起一次审批请求并按 outcome 落 reviewStatus（不抛错，fail-open）。
  * B3：B3 依赖齐全时，allowed-once → candidate promote 完整路径；rejected → dismiss 完整路径；
  *      依赖缺失（M2 兼容）→ 纯 metadata 迁移。

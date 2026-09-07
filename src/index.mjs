@@ -17,6 +17,7 @@ import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
 import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { isNeverApprovalPolicy } from './expression.mjs'
 import { makeAcpQueryTool } from './tools.mjs'
 import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
 import { createProviderRegistry } from './providers/registry.mjs'
@@ -625,7 +626,12 @@ export function apply(ctx, config = {}) {
       // consolidation 后台无 agent，只能把 style 候选标 pending_promotion；
       // 这里 pre-step 有 payload.agent，对未请求过的 pending 候选 fire-and-forget
       // 发起 approval.request（不 await，审批面板异步弹出，不阻塞 turn）。
+      // M4.3 前置（2026-09-07）：never 策略不发起自动审批——官方语义下每个 ask
+      // 确定性 rejected，自动发起 = 静默 dismiss pending 候选。候选滞留待 ask 模式
+      // 或人工命令（T4 Q3(a) 拍板语义提前落地）。
+      const approvalNever = isNeverApprovalPolicy(ctx, payload?.agent?.session)
       for (const cand of expression.collectPendingPromotions()) {
+        if (approvalNever) break
         if (promotionRequested.has(cand.id)) continue
         promotionRequested.add(cand.id)
         expression.requestPromotion(
