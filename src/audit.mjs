@@ -28,6 +28,11 @@ export const AUDIT_OPS = Object.freeze([
   // E1 补录（2026-09-07 审计）：live DB 存在但枚举缺失的 op
   'quarantine_noise',
   'supersede_transient_observation',
+  // T4 M4.1（2026-09-07）：反馈通道 rule 生命周期
+  'rule_drafted',
+  'rule_approved',
+  'rule_rejected',
+  'rule_superseded',
 ])
 
 /** 审计行为者枚举 */

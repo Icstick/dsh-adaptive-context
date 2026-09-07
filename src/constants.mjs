@@ -6,7 +6,9 @@ import { createHash } from 'node:crypto'
 // v5（2026-09-07，PLAN-S2 P3）：observation 表新增 authority 列——蒸馏产物的溯源权威
 // （写行时按 evidenceIds 聚合：user_correction > user_explicit > … > single_observation）。
 // 存量库 ALTER TABLE，旧行 authority=NULL（读侧回退 single_observation）。
-export const SCHEMA_VERSION = 5
+// v6（2026-09-07，T4 M4.1）：新增 rule 表（反馈通道规则——独立一等对象，
+// evidence_ids 互链；draft/active/rejected/superseded 状态机）。
+export const SCHEMA_VERSION = 6
 export const DEFAULT_DB_NAME = 'acp-ledger.db'
 
 /** Evidence 状态机 */

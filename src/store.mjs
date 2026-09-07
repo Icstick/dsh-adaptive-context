@@ -24,6 +24,7 @@ import {
 import { assertAuthorityConsistent } from './governance.mjs'
 import { createAuditStore } from './audit.mjs'
 import { createCandidateStore } from './candidate.mjs'
+import { createRuleStore } from './rule.mjs'
 
 const PRAGMAS = 'PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;'
 
@@ -143,6 +144,27 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS idx_audit_op ON audit (op);
 CREATE INDEX IF NOT EXISTS idx_audit_scope ON audit (scope_id);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit (actor);
+
+-- v6（2026-09-07，T4 M4.1）：rule 表——反馈通道规则（一等对象，与 evidence 互链）。
+-- 状态机：draft（沉淀草案）→ active（审批通过）/ rejected（用户拒绝）；修订 = 新行 supersedes 旧行。
+CREATE TABLE IF NOT EXISTS rule (
+  id            TEXT PRIMARY KEY,      -- ruleIdOf(scope_id, domain, text)
+  scope_id      TEXT NOT NULL DEFAULT 'user-global',
+  domain        TEXT NOT NULL,          -- 规则域（workflow/habit/communication/security/...自由文本≤24）
+  title         TEXT NOT NULL,          -- 短标题（≤60）
+  text          TEXT NOT NULL,          -- 规则正文（铁律候选 ≤200 字）
+  gates         TEXT NOT NULL DEFAULT '[]',   -- JSON：触发闸门 ['explicit-prefix','repeated-2x','security',...]
+  evidence_ids  TEXT NOT NULL DEFAULT '[]',   -- JSON：支撑证据 id 列表（与 ledger 互链）
+  supersedes    TEXT NOT NULL DEFAULT '',     -- 直接前驱 rule id（修订链，同 observation 方案甲）
+  state         TEXT NOT NULL DEFAULT 'draft',-- draft/active/rejected/superseded
+  source        TEXT NOT NULL DEFAULT 'consolidation', -- consolidation|manual
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  active_from   INTEGER,                -- 审批通过时间戳
+  active_until  INTEGER                 -- 失效时间戳（superseded/rejected 时记录）
+);
+CREATE INDEX IF NOT EXISTS idx_rule_scope_state ON rule (scope_id, state);
+CREATE INDEX IF NOT EXISTS idx_rule_domain ON rule (scope_id, domain);
 `
 
 function assertChoice(value, allowed, label) {
@@ -183,6 +205,7 @@ export function openEvidenceLedger(opts = {}) {
   // M3 B1：candidate / audit 操作层装配（表 DDL 已在 SCHEMA，工厂只操作同一 db 句柄）
   const auditStore = createAuditStore({ db })
   const candidateStore = createCandidateStore({ db })
+  const ruleStore = createRuleStore({ db }) // v6（T4 M4.1）：反馈通道规则操作层
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO evidence (
@@ -571,7 +594,7 @@ export function openEvidenceLedger(opts = {}) {
     append, getById, setState, updateMetadata, query, byContentHash, listActive, stats,
     getMeta, setMeta,
     upsertObservation, getObservationById, queryObservation, listObservations, getObservationLineage,
-    candidateStore, auditStore,
+    candidateStore, auditStore, ruleStore,
     close,
   }
 }
