@@ -1,6 +1,6 @@
 # PLAN-S2 — P3 画像层补全 + memento→ACP 迁移管道（B9 v0.3 S2）
 
-> dsh-adaptive-context · 2026-09-05 定稿。上级：D:\DSH_workspace\docs\unified-memory-seam-design-2026-09-04.md（B9 v0.3）。
+> dsh-adaptive-context · 2026-09-05 定稿。上级：D:\DSH_workspace\docs\plugins\unified-memory-seam-design-2026-09-04.md（B9 v0.3）。
 > 动机（用户 2026-09-05 反馈）：①memento 分层硬预算太少（agent 两层已满 3952/3907 @ 4000，
 > 写入持续 BUDGET_EXCEEDED）；②跨会话跟踪限制——举例：三个并行会话，会话 A 完成"视觉工具更新"，
 > 会话 B（另一视觉工作流）不知道已更新。
@@ -145,7 +145,7 @@ user track 重复性画像会被蒸馏进 user_model observation 轨道）。
 | 2 迁移管道 | ✅ 完成 | commit 0dd9469（scripts/migrate-memento.mjs 三段式）+ 6f8ba20（scope-map flatten）；9+1 用例
 | 3 真实 dry-run | ✅ 完成 | 25 entries → 32 候选（6 条切分）；guard block 0；清单见会话 dry-run 输出
 | 4 备份+迁移+对账 | ✅ 完成 | 备份 .dsh/archive/memento-backup-20260906/；32/32 插入 0 失败；对账 32；审计 op=import_memento 落账
-| 5 清空 memento + 观察期 | ⏳ 待拍板 | D1 推荐迁后清空；patch 已加 observationInjection:true（重启生效）
+| 5 清空 memento + 观察期 | ✅ 2026-09-08 | D1 迁后清空执行（scripts/clear-memento-after-migration.mjs：备份+清空+审计）；观察期 2 周自重启起算（observationInjection:true 同窗口生效）
 | 6 观察期满退役 | ⏳ 观察期后 | §5 步骤（用户确认）
 
 执行中拍板记录：

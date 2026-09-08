@@ -33,6 +33,8 @@ export const AUDIT_OPS = Object.freeze([
   'rule_approved',
   'rule_rejected',
   'rule_superseded',
+  // S2 步5（2026-09-08）：memento 迁后清空审计（观察期开始；scripts/clear-memento-after-migration.mjs）
+  'memento_cleared_after_migration',
 ])
 
 /** 审计行为者枚举 */
