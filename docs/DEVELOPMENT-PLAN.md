@@ -3,7 +3,7 @@
 > 仓库级 backlog：进行中/待办/已收口的工作条目与已知问题。与 docs/PLAN-S2-MIGRATION.md
 > （S2 迁移专项）并行；架构决策见 docs/adr/。配套设计文档仓库：acp-docs。
 > 维护规则：条目完成即更新状态并注明提交/日期；新发现先登记再动手（规划先行）。
-> 本文件初版登记来源：D:\DSH_workspace\docs\plugin-code-review-2026-09-07.md（2026-09-07 全面审查）
+> 本文件初版登记来源：D:\DSH_workspace\docs\audits\plugin-code-review-2026-09-07.md（2026-09-07 全面审查）
 
 ## 版本线
 
