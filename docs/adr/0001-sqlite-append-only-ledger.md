@@ -1,7 +1,7 @@
 # ADR-0001：证据账本 = 自建 append-only SQLite
 
 - 状态：采纳（2026-08）
-- 详情：acp-docs（ARCHITECTURE.md / CONTRACTS.md）
+- 详情：docs/design/ARCHITECTURE.md / docs/design/CONTRACTS.md
 
 ## 背景
 跨会话记忆需要「事实」与「派生视图」分离：事实必须可审计、可回溯、防篡改；观察/注入视图应该可随时重建。曾评估扩展 dsh-memento 或共享 memory 存储，但跨会话事实的权威性与治理模型（authority 分级）要求自有事实源。

@@ -1,7 +1,7 @@
 # ADR-0002：authority 模型 = 7 值确定性声明 + sourceClass 强制映射
 
 - 状态：采纳（2026-08）
-- 详情：acp-docs（GOVERNANCE.md）
+- 详情：docs/design/GOVERNANCE.md
 
 ## 背景
 跨会话注入会携带不同可信度的信息（用户明说 vs 单次观察 vs agent 推断）。若无确定性分级，注入内容无法被下游判断信任权重，也存在把 agent 自述当用户事实的污染风险（实践中发生过）。

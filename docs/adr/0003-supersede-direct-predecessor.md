@@ -1,7 +1,7 @@
 # ADR-0003：撤销语义 = supersede 方案甲（直接前驱）+ 两级冲突检测
 
 - 状态：采纳（2026-08）
-- 详情：acp-docs（GOVERNANCE.md / CONTRACTS.md）
+- 详情：docs/design/GOVERNANCE.md / docs/design/CONTRACTS.md
 
 ## 背景
 append-only 约束下，「用户纠正了之前的偏好」「两条证据冲突」如何表达？不能改旧证据，需要可审计的撤销链。
