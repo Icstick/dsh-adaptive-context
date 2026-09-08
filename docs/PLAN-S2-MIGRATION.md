@@ -83,14 +83,26 @@ user track 重复性画像会被蒸馏进 user_model observation 轨道）。
 - 观察期内其他会话的 memory 工具写入 → 会重新长数据（清空后继续写）——退役前窗口有增量：
   处理 = 摘除日再做一次增量迁移（幂等脚本天然支持）或提前告知各会话改用 acp_query。
 
-## 5. 退役步骤（观察期满后，用户确认）
+## 5. 退役步骤（观察期满后，用户确认；2026-09-08 修订——覆盖 L1 memento / L2 shared-memory 文件层 / 工具面）
 
-1. profile：web bundle 摘 dsh-memento + dsh-shared-memory（package.json dependencies + bundles）；
-   cordis.patch.yml 对应配置块删除（memento writePolicy、shared 相关）；
-2. .dsh/dsh-memento 目录归档（memory.db 已备份）；
-3. meow 残留目录（.dsh-meow，未启用）确认后删除（先备份）；
-4. memory 工具语义：memento 摘除后 memory 工具消失——写记忆 = 对话自然摄入（自动轨），
-   查记忆 = acp_query；显式"记住 X"语义走 S3 P4 显式通道设计（下一评审点，本期不实现）。
+0. **前置（✅ 2026-09-08 已做）**：画像 observation 化——USER.md 11 组关键画像转录为
+   user_explicit observation（evidence 源 user-md-migration，obs 全 active、注入白名单内），
+   红线/安全词/规划先行等自此走 ACP 注入面，不再依赖 USER.md 文件；
+1. **L2 文件层退役**：USER.md 归档备份至 .dsh/archive/（MEMORY.md / topics / .dsh-meow 已不存在，
+   无需处理）；从 $DSH_HOME/memories/ 移除 USER.md → shared-memory systemPrompt 注入段消失；
+2. **profile 摘除**：web profile package.json dependencies + bundles 移除 dsh-memento 与
+   dsh-shared-memory → pnpm install；
+3. **patch 清理**：cordis.patch.yml 删 memento writePolicy 块（shared 无配置块）；
+4. **数据目录归档**：.dsh/dsh-memento/ 整目录移 archive（memory.db 已迁空 + 双份备份）；
+5. **重启后验证**：① memory / memory_recall 工具从工具列表消失或优雅降级（memory_recall 的
+   session-history 段若宿主保留则不受影响——动态注册，执行时实测）② USER.md 画像注入段消失
+   ③ ACP user_model 段注入正常（画像 observation 跨会话可见）④ 无启动报错；
+6. **技能文案收尾**：capability-catalog 等含"内置 memory 已启用（memory 工具 + USER.md/MEMORY.md）"
+   描述更新为 ACP 单轨（acp_query + 自动轨）；
+7. **回滚**：bundle 重挂（package.json 恢复）+ 从 archive 恢复 USER.md / dsh-memento 目录 → 重启即回；
+   ACP 侧数据 append-only，回滚互不影响。
+
+（旧版 1-4 步见 git 历史：语义不变，本修订拆细并补 L2 文件层与验证项。）
 
 ## 6. 执行顺序（本文件批准后）
 
@@ -146,6 +158,7 @@ user track 重复性画像会被蒸馏进 user_model observation 轨道）。
 | 3 真实 dry-run | ✅ 完成 | 25 entries → 32 候选（6 条切分）；guard block 0；清单见会话 dry-run 输出
 | 4 备份+迁移+对账 | ✅ 完成 | 备份 .dsh/archive/memento-backup-20260906/；32/32 插入 0 失败；对账 32；审计 op=import_memento 落账
 | 5 清空 memento + 观察期 | ✅ 2026-09-08 | D1 迁后清空执行（scripts/clear-memento-after-migration.mjs：备份+清空+审计）；观察期 2 周自重启起算（observationInjection:true 同窗口生效）
+| 5b 画像 observation 化（L2 退役前置） | ✅ 2026-09-08 | USER.md 转录 11 组 user_explicit observation + 11 evidence 溯源（user-md-migration）；obs 全 active 注入白名单内 |
 | 6 观察期满退役 | ⏳ 观察期后 | §5 步骤（用户确认）
 
 执行中拍板记录：
