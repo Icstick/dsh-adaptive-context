@@ -93,7 +93,15 @@ export function parseObservations(text) {
       evidenceIds,
     })
   }
-  if (observations.length === 0) return { ok: false, observations: [] }
+  // P1-4 修复（2026-09-08）：显式空数组是**合法的模型决策**，不是解析失败。
+  // prompt 契约（T2.5，2026-09-07）明确要求「批内只有动作流水时输出 {"observations":[]}」；
+  // 旧实现把空数组合法产出判成 ok:false → 同批证据永不消化、水位卡死、每轮重试烧 LLM
+  // （实例实证：fail_count 57 连败，watermark 停滞 2026-09-07T04:19Z）。
+  // 语义：observations 数组存在即 schema 合法——显式空 = 空产成功；
+  // 仅当模型给出非空条目却全部字段非法（偏离契约）时判失败并保留重试。
+  if (data.observations.length > 0 && observations.length === 0) {
+    return { ok: false, observations: [] }
+  }
   return { ok: true, observations }
 }
 

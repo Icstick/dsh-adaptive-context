@@ -265,6 +265,40 @@ test('parseObservations：容忍 markdown fence + 前后杂文，过滤非法条
   assert.equal(parseObservations('').ok, false)
 })
 
+test('parseObservations：显式空数组 = 合法空产（P1-4 回归：动作流水批契约）', () => {
+  const empty = parseObservations('{"observations":[]}')
+  assert.equal(empty.ok, true)
+  assert.equal(empty.observations.length, 0)
+  // markdown fence 包裹的空数组同样合法
+  assert.equal(parseObservations('\`\`\`json\n{"observations":[]}\n\`\`\`').ok, true)
+  // 非空数组但条目全部字段非法 → 偏离 schema 契约，仍判失败（保留重试）
+  const garbage = parseObservations('{"observations":[{"subject":"","predicate":"","claimDomain":"bad","text":""}]}')
+  assert.equal(garbage.ok, false)
+  // 混合：部分合法 → 保留合法条目
+  const mixed = parseObservations('{"observations":[{"subject":"a","predicate":"b","claimDomain":"work","text":"c"},{"subject":"","predicate":"x"}]}')
+  assert.equal(mixed.ok, true)
+  assert.equal(mixed.observations.length, 1)
+})
+
+test('LLM 返回显式空数组：合法空产 → 消化该批并推进水位（P1-4 回归）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  let calls = 0
+  const llmCall = async () => { calls += 1; return '{"observations":[]}' }
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall })
+  const r = await c.runOnce()
+  assert.equal(r.ran, true)
+  assert.equal(r.digested, 2)                    // 批被消化（旧实现卡死在此）
+  assert.equal(r.observations, 0)                // 无 observation 产出
+  assert.equal(calls, 1)                         // 无重试
+  assert.equal(c.undigestedEvidence().length, 0) // 水位推进 → 无积压
+  assert.equal(ledger.queryObservation({ scopeId: 'user-global' }).total, 0)
+  // 空账再跑：不再消耗 LLM
+  const r2 = await c.runOnce()
+  assert.equal(r2.digested, 0)
+  assert.equal(calls, 1)
+})
+
 test('ruleObservationFor：subject=内容前 40 字符，text 截断 500', () => {
   const ev = { id: 'e1', claimDomain: 'work', content: 'x'.repeat(100) }
   const o = ruleObservationFor(ev)
