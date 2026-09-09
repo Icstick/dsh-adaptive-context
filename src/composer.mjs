@@ -270,16 +270,25 @@ export function compose(rawCandidates, opts = {}) {
     // 而不是像旧实现那样整条丢弃（账本里 53.8% 的证据因此永远进不了注入面）。
     const sectionCap = Number.isFinite(quotaTable[section]) ? quotaTable[section] : 300
     const maxBody = Math.max(40, Math.floor(sectionCap * 0.6) - LINE_LABEL_TOKENS)
+    // 2026-09-09（同行调研 P0-4）：高权威条目不截断——按 token 切会切掉条件从句，
+    // 「我不用 tabs，除了这个项目」截断成「我不用 tabs」就是语义反转。
+    // 改为整条保留，超 section 配额时由 packBySection 整条丢弃（结构化拒绝），绝不半条。
+    const HIGH_AUTHORITY = cand.authority === 'user_explicit' || cand.authority === 'user_correction'
     let content = raw
     let truncated = false
+    let oversize = false
     if (estimateTokens(raw) > maxBody) {
-      content = truncateToTokens(raw, Math.max(20, maxBody - 14)) + '…〔截断，全文见 ' + cand.id + '〕'
-      truncated = true
+      if (HIGH_AUTHORITY) {
+        oversize = true
+      } else {
+        content = truncateToTokens(raw, Math.max(20, maxBody - 14)) + '…〔截断，全文见 ' + cand.id + '〕'
+        truncated = true
+      }
     }
     // contentHash 固定按原文算：截断不应破坏跨候选的重复内容去重
     const contentHash = cand.contentHash ?? hashHex(raw)
     const tokens = estimateTokens(content) + LINE_LABEL_TOKENS
-    return { ...cand, content, contentHash, truncated, utility, section, tokens }
+    return { ...cand, content, contentHash, truncated, oversize, utility, section, tokens }
   })
 
   // —— Self-echo 过滤（T1）：当前用户消息（opts.query）不应被自己注回 ——

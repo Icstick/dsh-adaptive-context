@@ -156,6 +156,19 @@ explicit current refs
 > raw episodes（最后展开）
 ```
 
+### 6.1 高权威条目：整条保留，装不下整条拒绝（2026-09-09）
+
+composer 的单条软上限是「section quota × 60%」，超限条目此前一律截断 + 标注可回溯 id。
+对 `user_explicit` / `user_correction` 两条高权威来源，这条规则已改为**不截断**：
+
+- **理由**：按 token 切会切掉条件从句——「我不用 tabs，除了这个项目」截断成「我不用 tabs」
+  是语义反转，比不注入更坏。
+- **做法**：整条保留（`oversize=true`）交给 `packBySection`；装得进 section 配额就整条注入，
+  装不下就**整条丢弃**，drop reason 标注 `(high-authority kept whole)`——结构化拒绝，绝不半条。
+- **代价（已知）**：超大高权威条目可能整条进不了注入面。后续可做「让渡其他 section 配额」
+  （survey §3.4 的完整形态）来缓解；当前先保证"不改写用户原话"。
+- 低权威条目（`single_observation` 及以下）维持截断 + 可回溯 id 的旧行为。
+
 ## 7. 降级路径（MVP 就够用）
 
 ```text

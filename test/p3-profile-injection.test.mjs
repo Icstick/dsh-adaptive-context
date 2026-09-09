@@ -117,12 +117,27 @@ test('闸门语义：agent 自评溯源的观察不进任何段（agent_self_eva
   assert.ok(r.dropped.some((d) => d.id === 'obs_self' && d.reason.includes('authority not permitted')))
 })
 
-test('配额与预算：user_model 画像受 section quota 约束（800 内装箱，超限截断）', () => {
-  const cands = Array.from({ length: 6 }, (_, i) =>
+test('配额与预算：高权威条目整条保留（不截断），装不下整条拒绝', () => {
+  // ① 高权威 + 超过 60% 软上限但装得进 section 配额 → 整条注入、不截断
+  const fits = observationToCandidate(obsRow({ id: 'obs_fit', text: '画像条目内容'.repeat(16) }), 'user-global')
+  const r1 = compose([fits], { query: '话题', scopeId: 'user-global', currentSessionId: 'session-B', quota: MVP_SECTION_QUOTA })
+  assert.equal(r1.items.length, 1, '装得下就必须注入')
+  assert.equal(r1.items[0].truncated, false)
+  assert.equal(r1.items[0].oversize, true)
+  assert.ok(!r1.items[0].content.includes('截断'), '高权威条目不得被截断（截断会切掉条件从句）')
+  // ② 高权威 + 超大装不进 section 配额 → 整条丢弃（结构化拒绝），绝不半条
+  const huge = Array.from({ length: 6 }, (_, i) =>
     observationToCandidate(obsRow({ id: 'obs_q' + i, text: '画像条目内容 '.repeat(80) + i }), 'user-global'))
-  const r = compose(cands, { query: '话题', scopeId: 'user-global', currentSessionId: 'session-B', quota: MVP_SECTION_QUOTA })
-  assert.ok(r.items.length >= 1 && r.items.length < cands.length, '超配额部分应被装箱截断')
-  assert.ok(r.telemetry.sectionTokens.user_model <= MVP_SECTION_QUOTA.user_model)
+  const r2 = compose(huge, { query: '话题', scopeId: 'user-global', currentSessionId: 'session-B', quota: MVP_SECTION_QUOTA })
+  assert.equal(r2.items.length, 0)
+  assert.ok(r2.dropped.every((d) => d.reason.includes('high-authority kept whole')), JSON.stringify(r2.dropped.slice(0, 2)))
+  // ③ 低权威长条目仍走截断（保留可回溯 id，不丢整条）
+  const low = observationToCandidate(obsRow({ id: 'obs_low', authority: 'single_observation', claimDomain: 'user_fact', text: '观察内容 '.repeat(120) }), 'user-global')
+  const r3 = compose([low], { query: '话题', scopeId: 'user-global', currentSessionId: 'session-B', quota: MVP_SECTION_QUOTA })
+  assert.equal(r3.items.length, 1)
+  assert.equal(r3.items[0].truncated, true)
+  const sec3 = r3.items[0].section
+  assert.ok((r3.telemetry.sectionTokens[sec3] ?? 0) <= MVP_SECTION_QUOTA[sec3], sec3 + ' 超配额')
 })
 
 // ===================== 端到端链路（真库：append → consolidate 形状 upsert → 注入面） =====================

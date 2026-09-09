@@ -131,7 +131,8 @@ export function packBySection(candidates, quota = MVP_SECTION_QUOTA, totalCap = 
     }
     const current = used[c.section] ?? 0
     if (current + c.tokens > cap) {
-      dropped.push({ id: c.id, reason: `section '${c.section}' budget` })
+      // oversize = 高权威条目被刻意保留整条（未截断）；丢弃要说明是"整条拒绝"而不是"截断"
+      dropped.push({ id: c.id, reason: `section '${c.section}' budget` + (c.oversize ? ' (high-authority kept whole)' : '') })
       continue
     }
     if (totalTokens + c.tokens > capTotal) {
