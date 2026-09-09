@@ -40,6 +40,59 @@ export const WEIGHTS = Object.freeze({
 /** 无 Provider 时 semantic 并入 lexical（2026-08-25 决策） */
 export const LEXICAL_WITHOUT_SEMANTIC = WEIGHTS.lexical + WEIGHTS.semantic
 
+/** RRF 融合常数（k=60 为文献默认；越大越平滑） */
+export const RRF_K = 60
+
+/**
+ * Reciprocal Rank Fusion（2026-09-09，同行调研 §3.3）。
+ *
+ * 异构分数（词面重叠 0..1 vs provider 语义分，尺度不同）不做加权求和，
+ * 而是**各自排序后用 1/(k+rank) 融合**——避免某一路因尺度差异压制另一路
+ * （provider 分数挤在 0.9~1.0 时，归一化会把噪声放大成排名）。
+ *
+ * 某一路全零（如 provider 离线）时不参与融合：否则排名退化为数组顺序，是纯噪声。
+ * @param {Array<{id: string, lexical: number, semantic: number}>} rows
+ * @param {{k?: number, weights?: {lexical?: number, semantic?: number}}} [opts]
+ * @returns {Map<string, number>} id → 归一化到 0..1 的融合分（最高者 = 1）
+ */
+export function rrfFuse(rows, { k = RRF_K, weights = {} } = {}) {
+  const list = Array.isArray(rows) ? rows : []
+  const wLex = Number.isFinite(weights.lexical) ? weights.lexical : 1
+  const wSem = Number.isFinite(weights.semantic) ? weights.semantic : 1
+  const acc = new Map()
+  const addRoute = (key, weight) => {
+    if (!list.some((r) => Number(r[key]) > 0)) return
+    const sorted = [...list].sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0))
+    sorted.forEach((r, i) => acc.set(r.id, (acc.get(r.id) ?? 0) + weight / (k + i + 1)))
+  }
+  addRoute('lexical', wLex)
+  addRoute('semantic', wSem)
+  let max = 0
+  for (const v of acc.values()) if (v > max) max = v
+  const out = new Map()
+  for (const [id, v] of acc) out.set(id, max > 0 ? v / max : 0)
+  return out
+}
+
+/**
+ * 单条候选的 semantic 原始分（归一化前）。
+ * 抽成独立函数：utilityOf 与 compose 的 RRF 预计算共用同一口径，避免两处漂移。
+ * @param {object} cand
+ * @param {object} opts - { hasProvider, providerMax, providerWeights }
+ * @returns {number}
+ */
+export function semanticRouteScore(cand, opts = {}) {
+  if (!opts.hasProvider) return 0
+  const raw = typeof cand.providerScore === 'number' ? cand.providerScore : 0
+  if (opts.providerMax) {
+    const pid = typeof cand.sourceProvider === 'string' ? cand.sourceProvider : ''
+    const max = opts.providerMax.get(pid)
+    const norm = max > 0 ? raw / max : 0
+    return norm * (opts.providerWeights?.[pid] ?? 1)
+  }
+  return raw
+}
+
 /**
  * 跨会话候选 utility 惩罚系数（2026-08-30 决策 D1）。
  * 其他会话的证据即使通过类别闸门进入注入，也降权到 0.3，
@@ -135,25 +188,17 @@ export function utilityOf(cand, opts = {}) {
   //   - 无 providerWeights（M2 路径）：hasProvider 时直接用 providerScore（回归不变）
   //   - 有 providerWeights（A3 路径）：providerScore 先除以该 provider 最大分（归一化，
   //     跨 provider 分数尺度可比），再乘该 provider 权重（缺省 1.0）
-  let semantic = 0
-  if (opts.hasProvider) {
-    const raw = typeof cand.providerScore === 'number' ? cand.providerScore : 0
-    if (opts.providerMax) {
-      const pid = typeof cand.sourceProvider === 'string' ? cand.sourceProvider : ''
-      const max = opts.providerMax.get(pid)
-      const norm = max > 0 ? raw / max : 0
-      semantic = norm * (opts.providerWeights?.[pid] ?? 1)
-    } else {
-      semantic = raw
-    }
-  }
+  const semantic = semanticRouteScore(cand, opts)
   const lexEffective = lex
   const lexicalW = opts.hasProvider ? WEIGHTS.lexical : LEXICAL_WITHOUT_SEMANTIC
   const semanticTerm = opts.hasProvider ? WEIGHTS.semantic * semantic : 0
-
+  // RRF 融合（2026-09-09）：提供 opts.rrf 时用秩融合分替代 semantic+lexical 两项，
+  // 权重合计保持不变（WEIGHTS.semantic + WEIGHTS.lexical），其余项不受影响。
+  const fused = typeof opts.rrf === 'number' ? opts.rrf : null
   const relevance =
-    semanticTerm
-    + lexicalW * lexEffective
+    (fused === null
+      ? semanticTerm + lexicalW * lexEffective
+      : (WEIGHTS.semantic + WEIGHTS.lexical) * fused)
     + WEIGHTS.workFocus * (cand.workMatch ?? 0)
     + WEIGHTS.temporalFit * temporalFitScore(cand, opts.validAt)
     + WEIGHTS.evidenceSupport * evidenceSupportScore(cand)
@@ -253,6 +298,15 @@ export function compose(rawCandidates, opts = {}) {
     }
   }
 
+  // —— RRF 预计算（fusion='rrf' 时）：两路排序各自出秩，再融合 ——
+  const rrfById = opts.fusion === 'rrf'
+    ? rrfFuse(sessionFiltered.map((cand) => ({
+      id: cand.id,
+      lexical: lexicalScore(opts.query, cand.content),
+      semantic: semanticRouteScore(cand, opts),
+    })))
+    : null
+
   // —— Rank：utility 计算 + 候选元数据补齐 ——
   const ranked = sessionFiltered.map((cand) => {
     const { utility } = utilityOf(cand, {
@@ -262,6 +316,7 @@ export function compose(rawCandidates, opts = {}) {
       now: opts.now,
       providerWeights: providerWeights ?? undefined,
       providerMax,
+      rrf: rrfById ? (rrfById.get(cand.id) ?? 0) : undefined,
     })
     const section = cand.section ?? sectionOf(cand) // T4 M4.4：显式 section 覆盖（rules 段）
     const quotaTable = opts.quota ?? MVP_SECTION_QUOTA

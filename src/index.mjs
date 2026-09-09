@@ -60,6 +60,10 @@ export const Config = z.object({
   //   all —— 跨会话全类别注入（utility×0.3 惩罚 + session provenance 标记）；
   //   none —— 不注入任何跨会话内容。
   crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))).default('non-instructional'),
+  // 融合策略（2026-09-09）：weighted = 语义/词面加权求和（历史行为，默认）；
+  // rrf = 两路各自排序后 Reciprocal Rank Fusion——异构分数不做尺度相加。
+  // 默认不切换：排序变化需要先有对照数据（见 docs/design/COMPOSER.md §4.1）。
+  fusion: z.union([z.const('weighted'), z.const('rrf')]).default('weighted'),
   // 子代理会话降权（2026-08-30 决策 D2）：session.header.origin==='subagent' 时
   // kind='user' 的消息（父 agent 派发 prompt）降权为 agent_inference（记录但 quarantine），
   // 避免父任务书冒充用户指令。
@@ -389,6 +393,7 @@ export function apply(ctx, config = {}) {
       // deprecated：读侧已按候选自身 claimDomain 分组，不再影响注入（保留键位兼容）
       targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
       crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
+      fusion: z.union([z.const('weighted'), z.const('rrf')]),
       subagentDowngrade: z.boolean(),
       memosEnabled: z.boolean(),
       memosBaseUrl: z.string(),
@@ -668,6 +673,7 @@ export function apply(ctx, config = {}) {
         quota: config.sectionQuota,
         currentSessionId: sessionId,
         crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
+        fusion: config.fusion ?? 'weighted',
       })
 
       // —— T6 style 审批门（2026-08-27 架构修正）——

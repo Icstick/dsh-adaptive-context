@@ -80,6 +80,19 @@ v0.1：可接入自建 embedding 或 Hindsight 等外部 Provider。
 设计原则：semantic 是 provider 可选能力，不是 Composer 的硬依赖。
 ```
 
+### 4.1 融合策略：加权求和 vs RRF（2026-09-09）
+
+`fusion` 配置（默认 `weighted`，可切 `rrf`）：
+
+- **weighted（历史行为）**：`semanticTerm + lexicalW × lexical` 直接相加。语义分先按 provider 最大分归一化
+  再乘权重——当某 provider 的分数挤在 0.9~1.0 时，归一化会把噪声放大成排名差。
+- **rrf**：两路各自排序后用 `1/(k+rank)`（k=60）融合，再归一化到 0..1，权重合计不变
+  （`WEIGHTS.semantic + WEIGHTS.lexical`）。**尺度无关**，某一路全零（provider 离线）时该路不参与
+  ——否则排名退化成数组顺序，是纯噪声。
+
+默认不切换：排序变化需要先有对照数据（与 minScore 标定同一原则）。切换只需
+`adaptive-context.fusion: rrf`（设置页或 patch），无需改代码。
+
 ## 5. Token 预算（Model Experience 契约）
 
 ### 5.1 总预算

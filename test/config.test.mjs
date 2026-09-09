@@ -11,6 +11,7 @@ test('plugin config validates defaults through Standard Schema', async () => {
       recallLimit: 20,
       targetDomain: 'work',
       crossSessionPolicy: 'non-instructional',
+      fusion: 'weighted', // 2026-09-09：默认加权求和；rrf 为可选融合策略
       subagentDowngrade: true,
       debug: false,
       memosBaseUrl: 'http://127.0.0.1:18801',
