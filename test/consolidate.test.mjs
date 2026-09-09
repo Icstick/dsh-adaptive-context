@@ -81,6 +81,74 @@ test('节流：未消化证据 ≥10 立即触发（不等 turn）', async (t) =
   assert.equal(ledger.queryObservation({}).total, 10)
 })
 
+// ===================== P0 源头过滤（2026-09-09） =====================
+
+test('源头过滤：agent_authored/experience 不进蒸馏队列，用户证据照常', async (t) => {
+  const ledger = freshLedger(t)
+  for (let i = 1; i <= 3; i++) {
+    ledger.append(baseEv(i, {
+      sourceClass: 'agent_authored',
+      authority: 'single_observation',
+      claimDomain: 'experience',
+      content: '任务全绿 ' + i,
+    }))
+  }
+  ledger.append(baseEv(9, {
+    sourceClass: 'user_input',
+    authority: 'user_explicit',
+    claimDomain: 'user_preference',
+    content: '用户偏好 Bun',
+  }))
+
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall: null })
+  const pending = c.undigestedEvidence()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].claimDomain, 'user_preference')
+})
+
+test('源头过滤可关闭：skipAgentExperience=false 时动作流水照常进队列', async (t) => {
+  const ledger = freshLedger(t)
+  ledger.append(baseEv(1, {
+    sourceClass: 'agent_authored',
+    authority: 'single_observation',
+    claimDomain: 'experience',
+  }))
+  const c = createConsolidator({
+    ledger, minEvidence: 1, minTurns: 100, llmCall: null, skipAgentExperience: false,
+  })
+  assert.equal(c.undigestedEvidence().length, 1)
+})
+
+test('源头过滤：批内只剩动作流水时不产生 LLM 调用', async (t) => {
+  const ledger = freshLedger(t)
+  ledger.append(baseEv(1, {
+    sourceClass: 'agent_authored',
+    authority: 'single_observation',
+    claimDomain: 'experience',
+  }))
+  let calls = 0
+  const c = createConsolidator({
+    ledger, minEvidence: 1, minTurns: 100,
+    llmCall: async () => { calls += 1; return '{"observations":[]}' },
+  })
+  const r = await c.runOnce()
+  assert.equal(calls, 0)
+  assert.equal(r.digested, 0)
+  assert.equal(ledger.queryObservation({}).total, 0)
+})
+
+test('源头过滤：agent_authored 的非 experience 证据仍会蒸馏', async (t) => {
+  const ledger = freshLedger(t)
+  ledger.append(baseEv(1, {
+    sourceClass: 'agent_authored',
+    authority: 'agent_inference',
+    claimDomain: 'external_fact',
+    content: '官方文档称 X 已废弃',
+  }))
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 100, llmCall: null })
+  assert.equal(c.undigestedEvidence().length, 1)
+})
+
 // ===================== 队列背压 =====================
 
 test('队列背压：已有 pending 任务时新任务丢弃', async (t) => {

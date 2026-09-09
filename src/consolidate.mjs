@@ -21,11 +21,27 @@ import {
   CONSOLIDATION_META_LAST_FAILURE,
   CONSOLIDATION_META_RUN_DAY,
   CONSOLIDATION_META_RUN_COUNT,
+  CONSOLIDATION_SKIP_AGENT_EXPERIENCE,
   MAX_OBSERVATION_SUBJECT_CHARS,
   MAX_OBSERVATION_TEXT_CHARS,
 } from './constants.mjs'
 import { PENDING_PROMOTION } from './expression.mjs'
 import { isActionFlowObservation } from './governance.mjs'
+
+// ===================== 源头过滤（P0，2026-09-09） =====================
+
+/**
+ * 该条证据是否应跳过蒸馏。
+ * agent 自产 + experience 域 = 会话过程流水（"xxx 全绿"），prompt 契约本就要求
+ * 这类批输出空数组——送进 LLM 只消耗配额，不产出 observation。
+ * @param {object} ev - evidence 行（camelCase）
+ * @param {boolean} [skipAgentExperience] - false = 关闭过滤（测试/回溯用）
+ * @returns {boolean}
+ */
+export function isConsolidationSkippable(ev, skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE) {
+  if (!skipAgentExperience) return false
+  return ev?.sourceClass === 'agent_authored' && ev?.claimDomain === 'experience'
+}
 
 // ===================== 规则兜底（LLM 不可用） =====================
 
@@ -289,6 +305,8 @@ export function createConsolidator(opts = {}) {
     maxBatch = CONSOLIDATION_MAX_BATCH,
     maxContentChars = CONSOLIDATION_MAX_CONTENT_CHARS,
     maxRunsPerDay = CONSOLIDATION_MAX_RUNS_PER_DAY,
+    // P0 源头过滤（2026-09-09）：agent 自产 experience 动作流水不进队列
+    skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE,
     logger = console,
     // M3 B3：guarded auto promotion 依赖（index.mjs 装配；缺省 null = M2 行为）
     candidateStore = null,
@@ -315,7 +333,8 @@ export function createConsolidator(opts = {}) {
     return Number.isFinite(n) ? n : 0
   }
 
-  /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续） */
+  /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续）；
+   *  P0 源头过滤（2026-09-09）：agent 自产 experience 动作流水在进入队列前剔除。 */
   function undigestedEvidence() {
     const watermark = readMeta(CONSOLIDATION_META_WATERMARK_TS)
     const active = typeof ledger.listActive === 'function'
@@ -324,7 +343,9 @@ export function createConsolidator(opts = {}) {
     const pendingRows = watermark
       ? active.filter((ev) => (ev.observedAt ?? '') > watermark)
       : [...active]
-    return pendingRows.sort((a, b) => String(a.observedAt ?? '').localeCompare(String(b.observedAt ?? '')))
+    return pendingRows
+      .filter((ev) => !isConsolidationSkippable(ev, skipAgentExperience))
+      .sort((a, b) => String(a.observedAt ?? '').localeCompare(String(b.observedAt ?? '')))
   }
 
   /** P0-4：本次实际送进 LLM 的批（最早的 maxBatch 条）；剩余留给下一轮 */

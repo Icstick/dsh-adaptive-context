@@ -98,6 +98,14 @@ export const CONSOLIDATION_MAX_BATCH = 40
 // （55 连败实测：8 条 × 800 字输入 → ~12K token 机械输出撞 maxTokens）
 export const CONSOLIDATION_MAX_CONTENT_CHARS = 400
 export const CONSOLIDATION_MAX_RUNS_PER_DAY = 24
+
+/** P0 源头过滤（2026-09-09）：agent 自产的 experience 动作流水不进蒸馏队列。
+ *  实测（.dsh/acp 账本）：pending 2791 条中 2582 条（92.5%）是 agent_authored/experience
+ *  的过程日志（"111/111 全绿"、"合并树全绿"）。prompt 契约（T2.5）本就要求这类批
+ *  输出 {"observations":[]}——送进 LLM 只是白烧配额：4 条/run × 24 run/天 = 96 条/天，
+ *  清完 2791 条需 ~29 天（实际受 turn/end 触发限制更慢）。过滤后 pending 降到 ~209 条。
+ *  语义：仍在账本内（append-only 不删），只是不参与蒸馏。 */
+export const CONSOLIDATION_SKIP_AGENT_EXPERIENCE = true
 /** 失败留痕与日频计数（P0-1/P0-4） */
 export const CONSOLIDATION_META_FAIL_COUNT = 'consolidation_fail_count'
 export const CONSOLIDATION_META_LAST_FAILURE = 'consolidation_last_failure'
