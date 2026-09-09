@@ -655,9 +655,17 @@ function migrateObservationAuthority(db) {
 }
 
 /**
- * Observation 溯源权威聚合（P3，PLAN-S2 §8.3）。
+ * Observation 溯源权威聚合（P3，PLAN-S2 §8.3；2026-09-09 改为非放大）。
+ *
  * 秩序 = authority 的"用户确定性"排序：纠正 > 用户显式声明 > 系统策略 > 外部信息
- * > 单次观察 > agent 推断 > agent 自评。取批内最高秩（并列取先出现的，确定性）。
+ * > 单次观察 > agent 推断 > agent 自评。
+ *
+ * **取最低秩（non-amplification firewall）**：蒸馏后的 observation 不得比它最弱的那条
+ * 支撑证据更可信——否则「用户显式声明 + agent 推断」合并出来的结论会顶着 user_explicit
+ * 的名义进入注入，等于用弱证据洗白强权威（参见 arXiv 2607.29167：漏洞态合并记忆
+ * ASR 实测可达 1.000）。旧实现取最高秩，正是这条放大路径。
+ *
+ * 推论：模型想让一条 observation 拿到高权威，只能只列真正支撑它的强证据。
  * @param {string[]} authorities - 溯源 evidence 的 authority 值集合
  * @returns {string} AUTHORITIES 之一
  */
@@ -672,14 +680,15 @@ export function deriveObservationAuthority(authorities) {
     agent_self_evaluation: 0,
   }
   if (!Array.isArray(authorities) || authorities.length === 0) return 'single_observation'
-  let best = 'single_observation'
-  let bestRank = -1
+  let worst = null
+  let worstRank = Number.POSITIVE_INFINITY
   for (const a of authorities) {
     const r = rank[a]
     if (r === undefined) continue
-    if (r > bestRank) { bestRank = r; best = a }
+    if (r < worstRank) { worstRank = r; worst = a }
   }
-  return best
+  // 全部为未知值（旧行/脏数据）→ 回到保守默认
+  return worst ?? 'single_observation'
 }
 
 /** 按 evidenceIds 查库聚合溯源权威（分块防变量上限；无匹配/空 → single_observation 兜底） */

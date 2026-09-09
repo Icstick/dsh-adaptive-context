@@ -201,7 +201,7 @@ pnpm install
 - **调度器**：宿主 inject-scheduler 为可选服务——ACP 注册 `acp.composer` 段（budget=hotTokens，token 口径；未挂 scheduler 时静默跳过，pre-step 注入照常）
 - **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计
 - **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
-- **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导；注入侧只放行白名单权威（T2）
+- **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导，**取支撑证据中最弱的一条**（2026-09-09 非放大规则，防弱证据洗白强权威）；注入侧只放行白名单权威（T2）
 
 ## API（ctx.acp）
 

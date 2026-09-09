@@ -54,6 +54,18 @@ Week3 "switched to Vue"         → "was a React enthusiast..., but has now swit
 2. Hindsight 没有 authority 维度——observation 的权威完全由 LLM 判定
 3. ACP 的 Observation 必须 100% 可追溯到 Evidence（provenance coverage 验收 KPI）
 
+### 2.1 非放大规则（2026-09-09，行为变更）
+
+**observation 的 authority = 支撑证据中最弱的一条**（`store.deriveObservationAuthority` 取最低秩，
+旧实现取最高秩）。理由：蒸馏不得让结论比它最弱的支撑更可信——否则「用户显式声明 + agent 推断」
+合并出的文本会顶着 `user_explicit` 的名义进入注入，等于用弱证据洗白强权威
+（arXiv [2607.29167](https://arxiv.org/abs/2607.29167) 实测漏洞态合并记忆 ASR 可达 1.000）。
+
+推论与代价：
+- 想让结论拿到高权威，只能只列真正支撑它的证据；把被更正的旧证据一起列上会整条降级。
+- 空/全未知 evidenceIds 仍回落 `single_observation`（保守默认，不变）。
+- consolidation prompt 已同步写明该规则，让模型自己决定"列哪几条"。
+
 ## 3. v0.1 Consolidation 后台流程（设计）
 
 ```text

@@ -137,7 +137,9 @@ test('端到端：真库溯源聚合 → observationToCandidate → compose 注�
     subject: '包管理器', predicate: '偏好', claimDomain: 'user_preference',
     text: '用户项目依赖统一用 bun（曾用 pnpm 后更正）', evidenceIds: [a.id, b.id],
   })
-  assert.equal(up.row.authority, 'user_correction', '溯源聚合应得 user_correction')
+  // 2026-09-09 非放大：evidenceIds 同时列了被更正的旧声明 → 取最弱 = user_explicit。
+  // user_explicit 仍属高权威轨，画像注入路径不受影响（下面断言继续成立）。
+  assert.equal(up.row.authority, 'user_explicit', '非放大聚合应取支撑证据中最弱的一条')
 
   // 会话 B 注入面（无词法重叠也要命中——observation 轨全文注入）
   const obsCand = observationToCandidate(ledger.listObservations('user-global')[0], 'user-global')
@@ -146,7 +148,7 @@ test('端到端：真库溯源聚合 → observationToCandidate → compose 注�
   assert.equal(r.items.length, 2, '本会话消息 + 跨会话画像都应注入')
   const ob = r.items.find((i) => i.id === up.id)
   assert.ok(ob, '画像 observation 必须在注入面')
-  assert.equal(ob.authority, 'user_correction')
+  assert.equal(ob.authority, 'user_explicit')
   assert.ok(ob.content.includes('bun'))
 })
 

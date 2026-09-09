@@ -136,6 +136,9 @@ export function buildConsolidationPrompt(evidences, maxContentChars = CONSOLIDAT
     `claimDomain must be one of: ${CLAIM_DOMAINS.join(', ')}.`,
     'Domain guidance: style = tone/format/presentation preferences (e.g. 简洁/详细/亲切的语气, 先结论后展开, 中文回复); user_preference = substantive preferences (e.g. 用 pnpm, 用 Bun). 表达风格偏好一律标 style，不要标 user_preference。',
     'subject is a short noun phrase (<= 20 chars); predicate is a short relation verb; text is a very concise fact (<= 120 characters, 中文 <= 60 字); evidenceIds reference the supporting evidence ids.',
+    // 2026-09-09（non-amplification）：observation 的权威 = 支撑证据中最弱的一条，
+    // 所以把弱证据塞进 evidenceIds 只会稀释结论的可信度。写清规则，让模型自己精确。
+    'An observation inherits the WEAKEST authority among its supporting evidenceIds — list only the evidence that genuinely supports the claim; adding weak or unrelated evidence weakens the result.',
     // P0-7（2026-09-02）：输出收敛——模型曾按每条 evidence 机械输出一条完整 observation
     // （20 条 × ~700 token 超 maxTokens 截断 → 连败）。改为显式引导合并 + 短文本。
     // P3 修复（2026-09-06）：batch8 × 800 字输入实测仍 ~12K token 机械输出（55 连败，

@@ -42,12 +42,17 @@ const evInput = (authority, content, ref) => ({
 
 // ===================== deriveObservationAuthority（纯函数） =====================
 
-test('聚合秩：user_correction > user_explicit > system_policy > external_information > single_observation > agent_inference > agent_self_evaluation', () => {
-  assert.equal(deriveObservationAuthority(['single_observation', 'user_explicit']), 'user_explicit')
-  assert.equal(deriveObservationAuthority(['user_explicit', 'user_correction']), 'user_correction')
-  assert.equal(deriveObservationAuthority(['agent_inference', 'agent_self_evaluation']), 'agent_inference')
-  assert.equal(deriveObservationAuthority(['external_information', 'single_observation']), 'external_information')
-  assert.equal(deriveObservationAuthority(['system_policy', 'agent_inference']), 'system_policy')
+test('非放大聚合：observation 取支撑证据中最弱的一条（2026-09-09 改 max→min）', () => {
+  // 秩序（高→低）：user_correction > user_explicit > system_policy > external_information
+  //                    > single_observation > agent_inference > agent_self_evaluation
+  assert.equal(deriveObservationAuthority(['single_observation', 'user_explicit']), 'single_observation')
+  assert.equal(deriveObservationAuthority(['user_explicit', 'user_correction']), 'user_explicit')
+  assert.equal(deriveObservationAuthority(['agent_inference', 'agent_self_evaluation']), 'agent_self_evaluation')
+  assert.equal(deriveObservationAuthority(['external_information', 'single_observation']), 'single_observation')
+  assert.equal(deriveObservationAuthority(['system_policy', 'agent_inference']), 'agent_inference')
+  // 单条不受影响
+  assert.equal(deriveObservationAuthority(['user_explicit']), 'user_explicit')
+  assert.equal(deriveObservationAuthority(['agent_inference']), 'agent_inference')
 })
 
 test('聚合兜底：空 / 全非法 / 非数组 → single_observation', () => {
@@ -58,13 +63,18 @@ test('聚合兜底：空 / 全非法 / 非数组 → single_observation', () => 
 
 // ===================== upsertObservation 聚合落库 =====================
 
-test('upsert 无显式 authority：按 evidenceIds 聚合落库（纠正 > 声明）', (t) => {
+test('upsert 无显式 authority：按 evidenceIds 聚合落库（非放大——取最弱）', (t) => {
   const ledger = freshLedger(t)
   const a = ledger.append(evInput('user_explicit', '用户说要用 pnpm', 'a'))
   const b = ledger.append(evInput('user_correction', '更正：用 bun', 'b'))
-  const r = ledger.upsertObservation({ subject: '包管理器', predicate: '偏好', claimDomain: 'user_preference', text: '用 bun', evidenceIds: [a.id, b.id] })
-  assert.equal(r.inserted, true)
-  assert.equal(r.row.authority, 'user_correction')
+  // 同时列上被更正的旧证据 → 整条 observation 降到最弱的那条（user_explicit）。
+  // 这是刻意的激励：想让结论拿到 user_correction，就只列真正支撑它的那条。
+  const mixed = ledger.upsertObservation({ subject: '包管理器', predicate: '偏好', claimDomain: 'user_preference', text: '用 bun', evidenceIds: [a.id, b.id] })
+  assert.equal(mixed.inserted, true)
+  assert.equal(mixed.row.authority, 'user_explicit')
+  // 只列更正证据 → 拿到 user_correction（正确用法）
+  const focused = ledger.upsertObservation({ subject: '包管理器', predicate: '偏好', claimDomain: 'user_preference', text: '用 bun', evidenceIds: [b.id] })
+  assert.equal(focused.row.authority, 'user_correction')
 })
 
 test('upsert 聚合：仅单次观察溯源 → single_observation（不得升级）', (t) => {
