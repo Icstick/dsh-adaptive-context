@@ -29,7 +29,7 @@ import { evaluateCandidate } from './policy.mjs'
 import {
   CLAIM_DOMAINS, CONSOLIDATION_MIN_EVIDENCE, CONSOLIDATION_MIN_TURNS,
 } from './constants.mjs'
-import { isActionFlowObservation } from './governance.mjs'
+import { isActionFlowObservation, preferenceFilterAllows } from './governance.mjs'
 import { writeRulesDir } from './rules.mjs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
@@ -99,6 +99,11 @@ export const Config = z.object({
   sectionQuota: z.any(),
   policyConfig: z.any(),                   // 可选：policy 覆盖（minEvents/maxEvidenceAgeDays…；
                                            // floors 收口由 policy.mjs 保证，只允许更严）
+  // 阶段 2.3（2026-09-09）：一次性任务指令不进 user_model 画像注入。
+  //   off    = 关闭判别
+  //   shadow = 只统计不生效（默认——先观察注入差异再切）
+  //   on     = 生效过滤
+  preferenceEphemeralFilter: z.string().default('shadow'),
 })
 
 /**
@@ -587,12 +592,25 @@ export function apply(ctx, config = {}) {
             ? ledger.queryObservation({ scopeId, state: 'active', authorities, limit: 100, order: 'desc' })
             : null
           const rows = q ? q.items : (typeof ledger.listObservations === 'function' ? ledger.listObservations(scopeId) : [])
+          // 阶段 2.3（2026-09-09）：一次性任务指令判别。
+          //   shadow（默认）= 只统计不生效；on = 真过滤；off = 关闭。
+          const ephemeralMode = config.preferenceEphemeralFilter ?? 'shadow'
+          let ephemeralDropped = 0
           observationCandidates = (Array.isArray(rows) ? rows : [])
             .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
             // T2.5（2026-09-07）：动作流水形态不进注入（「用户 询问/确认/审批…」是
             // 会话转写，非画像——authority 聚合虚高导致过闸门）
             .filter((o) => !isActionFlowObservation(o.subject, o.predicate))
+            .filter((o) => {
+              const allowed = preferenceFilterAllows(o, ephemeralMode)
+              if (!allowed) ephemeralDropped += 1
+              return allowed
+            })
             .map((o) => observationToCandidate(o, scopeId))
+          if (ephemeralMode !== 'off' && ephemeralDropped > 0) {
+            ctx.logger?.debug?.('[acp] ephemeral_preference mode=' + ephemeralMode
+              + ' dropped=' + ephemeralDropped + ' kept=' + observationCandidates.length)
+          }
         } catch (err) {
           ctx.logger?.warn?.('[acp] acp:degraded observation_read_failed reason='
             + (err instanceof Error ? err.message : String(err)))

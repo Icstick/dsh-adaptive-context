@@ -234,3 +234,50 @@ export function isActionFlowObservation(subject, predicate) {
   const p = String(predicate ?? '').trim()
   return ACTION_FLOW_PREDICATES.has(p)
 }
+
+// ===================== 一次性任务指令判别（阶段 2.3，2026-09-09） =====================
+// 问题：134 条 user_preference 里真正跨会话的不到 20 条，其余是当次任务指令
+// （"字体再大一些""改一下默认值"）——它们进 user_model 注入会稀释画像。
+// 判别只针对 claimDomain==='user_preference'，且**保守**：宁可漏判也不误杀
+// （明确耐久表达的偏好一律保留）。纯确定性实现，不调 LLM。
+
+/** 强信号：指代当次上下文——离开当前会话即无意义。
+ *  「这个/那个」排除成语用法（"这个时候""那个时候"）。 */
+const EPHEMERAL_DEIXIS = /(?:这里|这边|这段|这行|这份|这页|该页|这张|此项|此处|上述|刚才|这版|那版|这个(?!时候)|那个(?!时候))/
+/** 弱信号：命令式动作短语（需配合"无耐久标记"才判一次性） */
+const EPHEMERAL_IMPERATIVE = /(?:先做|改一下|改下|试试|试下|弄一下|弄下|调一下|调整一下|看看|做吧|加上|去掉|删掉|换掉|再来|继续|接着|往下)/
+/** 命令式只认开头 N 字内出现，或整条 ≤M 字——避免长文本夹一个"去掉"就误杀 */
+const IMPERATIVE_HEAD_CHARS = 12
+const IMPERATIVE_SHORT_CHARS = 40
+/** 耐久信号：明确表达跨会话的稳定偏好 → 一律保留 */
+// 注意：「默认」不在此列——它同时出现在任务指令里（"改一下默认值"），
+// 判别保守取向是"宁可漏判"，所以只收明确表达跨会话稳定性的词。
+const DURABLE_MARKER = /(?:之后|以后|统一|一律|总是|每次|习惯|偏好|一直|都要|永远|今后|往后|不喜欢|喜欢|倾向|原则|纪律|先行|优先|流程|规范|约定)/
+
+/**
+ * 是否为"一次性任务指令"（不应进 user_model 画像注入）。
+ * @param {{claimDomain?: string, text?: string}} obs - observation 行
+ * @returns {boolean} true = 判为一次性（读侧可据此过滤）
+ */
+export function isEphemeralPreference(obs) {
+  if (!obs || obs.claimDomain !== 'user_preference') return false
+  const text = String(obs.text ?? '')
+  if (!text) return false
+  if (DURABLE_MARKER.test(text)) return false
+  if (EPHEMERAL_DEIXIS.test(text)) return true
+  const m = EPHEMERAL_IMPERATIVE.exec(text)
+  if (!m) return false
+  return m.index < IMPERATIVE_HEAD_CHARS || text.length <= IMPERATIVE_SHORT_CHARS
+}
+
+/**
+ * 读侧过滤闸门（阶段 2.3）：mode=off 全放行；shadow 只统计不生效；on 真过滤。
+ * @param {{claimDomain?: string, text?: string}} obs
+ * @param {'off'|'shadow'|'on'} mode
+ * @returns {boolean} true = 允许进入注入候选
+ */
+export function preferenceFilterAllows(obs, mode = 'shadow') {
+  if (mode === 'off') return true
+  if (!isEphemeralPreference(obs)) return true
+  return mode !== 'on'
+}

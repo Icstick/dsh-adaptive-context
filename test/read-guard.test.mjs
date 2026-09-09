@@ -2,7 +2,10 @@
 // authority → claimDomain 资格矩阵（GOVERNANCE.md §2.5，决策日期 2026-08-25）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readGuard, AUTHORITY_DOMAIN_MATRIX, authorityMayClaimDomain } from '../src/governance.mjs'
+import {
+  readGuard, AUTHORITY_DOMAIN_MATRIX, authorityMayClaimDomain,
+  isEphemeralPreference, preferenceFilterAllows,
+} from '../src/governance.mjs'
 import { AUTHORITIES, CLAIM_DOMAINS } from '../src/constants.mjs'
 
 /** 最小 evidence（readGuard 只读 state/scopeId/authority/validFrom/validUntil） */
@@ -123,4 +126,51 @@ test('未知 authority：矩阵不适用，不拒绝（读边界 fail-open，兼
   assert.equal(g.allowed, true)
   assert.equal(authorityMayClaimDomain(undefined, 'user_preference'), true)
   assert.equal(authorityMayClaimDomain('nonexistent_authority', 'work'), true)
+})
+
+// ===================== 阶段 2.3：一次性任务指令判别（2026-09-09） =====================
+
+test('isEphemeralPreference：指代当次上下文的偏好判为一次性', () => {
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '这个字体再大一些' }), true)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '这里改成方形' }), true)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '刚才那版好一点' }), true)
+})
+
+test('isEphemeralPreference：命令式动作且无耐久标记判为一次性', () => {
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '改一下默认值' }), true)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '先做轻量的' }), true)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '继续' }), true)
+})
+
+test('isEphemeralPreference：明确耐久表达的偏好一律保留', () => {
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '之后统一用 Bun' }), false)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '每步提交、feature 分支' }), false)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '一直用 pnpm，不喜欢 npm' }), false)
+  // 耐久标记优先于指代/命令式（保守：宁可漏判也不误杀）
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '以后这个默认改成折叠' }), false)
+})
+
+test('isEphemeralPreference：非 user_preference 域不参与判别', () => {
+  for (const d of ['user_fact', 'work', 'experience', 'style', 'external_fact']) {
+    assert.equal(isEphemeralPreference({ claimDomain: d, text: '这个改一下' }), false)
+  }
+  assert.equal(isEphemeralPreference(null), false)
+  assert.equal(isEphemeralPreference({ claimDomain: 'user_preference', text: '' }), false)
+})
+
+test('preferenceFilterAllows：off 全放行 / shadow 只统计不生效 / on 真过滤', () => {
+  const durable = { claimDomain: 'user_preference', text: '之后统一用 Bun' }
+  const ephemeral = { claimDomain: 'user_preference', text: '这个字体再大一些' }
+
+  assert.equal(preferenceFilterAllows(durable, 'off'), true)
+  assert.equal(preferenceFilterAllows(ephemeral, 'off'), true)
+
+  assert.equal(preferenceFilterAllows(durable, 'shadow'), true)
+  assert.equal(preferenceFilterAllows(ephemeral, 'shadow'), true) // shadow 保留
+
+  assert.equal(preferenceFilterAllows(durable, 'on'), true)
+  assert.equal(preferenceFilterAllows(ephemeral, 'on'), false) // 唯一会真丢的模式
+
+  // 缺省 = shadow（默认先观察）
+  assert.equal(preferenceFilterAllows(ephemeral), true)
 })
