@@ -7,7 +7,7 @@
 //     → View (materialized hot path, cache——可随时从 candidate 重放原子重建)
 //
 // 本模块只做"视图文件"这一层：行集合的构建（buildExpressionRows，从 candidate 重放）、
-// 原子写（temp+rename）、读取（fail-open）、校验（与重放对比 checksum）。
+// 原子写（temp+rename）、读取（fail-open + 内容完整性校验）、校验（与重放对比 checksum）。
 // 状态迁移/审计/审批 由 expression.mjs / consolidate.mjs 负责；本模块零副作用原则：
 // 只读写视图文件，不碰 candidate/evidence/audit 表。
 //
@@ -74,7 +74,10 @@ export function buildExpressionRows({ candidateStore, ledger, scopeId } = {}) {
         scopeId: c.scopeId ?? ev.scopeId,
         sessionId: ev.sessionId ?? '',
         sourceClass: ev.sourceClass ?? 'evidence',
-        authority: ev.authority ?? 'user_explicit',
+        // 审计 H-5（2026-09-10）：authority 缺失时降级为最弱可信档 single_observation
+        // （而非取最高信任 user_explicit）——该值不在默认 observationAuthorities 白名单内，
+        // 也不会被判 STRONG，杜绝"字段缺失 = 拿最高权威"的 fail-open 方向。
+        authority: ev.authority ?? 'single_observation',
         confidence: typeof ev.confidence === 'number' ? ev.confidence : 0.5,
         durability: typeof ev.durability === 'number' ? ev.durability : 0.5,
         sensitivity: ev.sensitivity ?? 'private',
@@ -118,8 +121,15 @@ export function createViews({ dir, ledger = null, candidateStore = null, scopeId
   const viewFile = path.join(dir, EXPRESSION_VIEW_FILE)
 
   /**
-   * 读视图行（fail-open）：文件缺失/损坏/schema 不符 → null（调用方回落 ledger 注入）。
-   * 不做 checksum 校验（那是 verifyExpression 的职责；本函数是 hot path）。
+   * 读视图行（fail-open）：文件缺失/损坏/schema 不符/checksum 失配 → null（调用方回落 ledger 注入）。
+   *
+   * 完整性校验（审计 H-5，2026-09-10）：文件头 checksum 必须与行内容重算一致。
+   * 此前只验 schema/version 两个常量字段，行内容零保护——手写一份
+   * {dir}/expression.json 即可向所有会话投放任意高权威记忆，绕过 writeGuard 与 append-only。
+   * 失配一律视同"损坏"返回 null（fail-safe 方向：回落 ledger，不注入未验证内容）。
+   *
+   * 成本：每步一次 canonicalize + sha256（row 数量级 = promoted 候选 × 其证据行，
+   * 通常个位数）；实测见 test 与 fix 报告。
    * @returns {object[] | null}
    */
   function readExpression() {
@@ -127,7 +137,10 @@ export function createViews({ dir, ledger = null, candidateStore = null, scopeId
       if (!existsSync(viewFile)) return null
       const parsed = JSON.parse(readFileSync(viewFile, 'utf8'))
       if (!parsed || parsed.schema !== VIEW_SCHEMA || parsed.version !== VIEW_VERSION) return null
-      return Array.isArray(parsed.rows) ? parsed.rows : null
+      if (!Array.isArray(parsed.rows)) return null
+      if (typeof parsed.checksum !== 'string') return null
+      if (parsed.checksum !== checksumOf(parsed.rows)) return null
+      return parsed.rows
     } catch {
       return null
     }

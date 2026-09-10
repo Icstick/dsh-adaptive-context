@@ -259,7 +259,9 @@ export function viewRowToCandidate(r, fallbackScopeId) {
     content: r.content,
     sourceClass: r.sourceClass ?? 'evidence',
     claimDomain: r.claimDomain ?? 'style',
-    authority: r.authority ?? 'user_explicit',
+    // 审计 H-5（2026-09-10）：与 views.mjs buildExpressionRows 同源——authority 缺失时
+    // 降级为最弱可信档，不取最高信任（view 行是文件读入的外部输入，兜底必须 fail-safe）。
+    authority: r.authority ?? 'single_observation',
     confidence: typeof r.confidence === 'number' ? r.confidence : 0.5,
     durability: typeof r.durability === 'number' ? r.durability : 0.5,
     sensitivity: r.sensitivity ?? 'private',
