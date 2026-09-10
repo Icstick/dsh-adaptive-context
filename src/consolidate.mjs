@@ -381,6 +381,36 @@ export function createConsolidator(opts = {}) {
   }
 
   /** P0-1：失败留痕——meta 计数 + 可 grep 日志 + audit（op=consolidate, actor=consolidation） */
+  function readFailCount() {
+    const n = Number(readMeta(CONSOLIDATION_META_FAIL_COUNT) ?? 0)
+    return Number.isFinite(n) ? n : 0
+  }
+
+  /**
+   * 成功留痕（2026-09-10）。
+   * 此前 fail_count 只增不减：58 连败后即便蒸馏已恢复，计数仍停在 58，
+   * 看板无法区分「此刻仍在失败」与「早已恢复」；成功也不写 audit，
+   * 历史里只剩 58 条 failure 行，无从判断最近一次蒸馏发生在何时。
+   * 现值语义 = 连续失败次数：成功即归零并清除 last_failure。
+   */
+  function recordSuccess(digested, observations) {
+    const failuresBefore = readFailCount()
+    if (failuresBefore > 0) writeMeta(CONSOLIDATION_META_FAIL_COUNT, '0')
+    if (failuresBefore > 0) writeMeta(CONSOLIDATION_META_LAST_FAILURE, '')
+    try {
+      auditStore?.appendAudit?.({
+        op: 'consolidate',
+        scopeId,
+        actor: 'consolidation',
+        reason: 'consolidation ok; watermark advanced',
+        payload: { batchSize: digested, observations, failuresBefore },
+      })
+    } catch (err) {
+      logger?.warn?.('[acp] consolidation success audit write error: ' + (err && err.message))
+    }
+    return failuresBefore
+  }
+
   function recordFailure(batchSize, error) {
     const n = Number(readMeta(CONSOLIDATION_META_FAIL_COUNT) ?? 0)
     writeMeta(CONSOLIDATION_META_FAIL_COUNT, String((Number.isFinite(n) ? n : 0) + 1))
@@ -472,7 +502,8 @@ export function createConsolidator(opts = {}) {
       }
 
       advanceWatermark(evidences)
-      return { ran: true, digested: evidences.length, observations: wrote }
+      const failuresBefore = recordSuccess(evidences.length, wrote)
+      return { ran: true, digested: evidences.length, observations: wrote, failuresBefore }
     } finally {
       running = false
       pending = false

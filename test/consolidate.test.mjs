@@ -622,3 +622,41 @@ test('runOnce：LLM 产出流水形态（用户+询问）→ 落库前硬过滤�
   assert.equal(obs.total, 1)
   assert.equal(obs.items[0].subject, '包管理器')
 })
+// ===================== 失败计数复位（2026-09-10） =====================
+
+test('consolidation 成功后 fail_count 归零并写 audit（不再只增不减）', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 3)
+
+  const audits = []
+  const auditStore = { appendAudit: (row) => audits.push(row) }
+  // 第 1 次调用返回不可解析输出 → 2 次尝试都失败 → 记录一次失败
+  // 第 2 次起返回合法 observation JSON → 成功
+  let calls = 0
+  const llmCall = async () => {
+    calls += 1
+    if (calls <= 2) return '这不是 JSON'
+    // 契约：必须是 { observations: [...] }，裸数组会被 parseObservations 判为非法
+    return JSON.stringify({ observations: [{ subject: '用户', predicate: '偏好', claimDomain: 'user_fact', text: '用户偏好 pnpm' }] })
+  }
+
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 99, llmCall, auditStore })
+
+  const r1 = await c.runOnce()
+  assert.equal(r1.reason, 'llm_failed')
+  assert.equal(ledger.getMeta('consolidation_fail_count'), '1')
+  assert.ok(ledger.getMeta('consolidation_last_failure'), 'last_failure 应写入')
+
+  const r2 = await c.runOnce()
+  assert.equal(r2.reason, undefined)
+  assert.ok(r2.digested >= 1, '第二批应消化成功')
+  assert.equal(r2.failuresBefore, 1, '返回值应带上成功前的连续失败次数')
+  assert.equal(ledger.getMeta('consolidation_fail_count'), '0', '成功后必须归零')
+  assert.equal(ledger.getMeta('consolidation_last_failure'), '', '成功后应清除 last_failure')
+
+  const okAudit = audits.find((a) => a.reason === 'consolidation ok; watermark advanced')
+  assert.ok(okAudit, '成功应写 audit，否则历史里只剩失败行')
+  assert.equal(okAudit.payload.failuresBefore, 1)
+})
+
+console.log('\nAll consolidation tests passed.')
