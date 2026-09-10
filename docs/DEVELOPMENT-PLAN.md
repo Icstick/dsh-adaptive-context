@@ -25,7 +25,7 @@
 | ACP-B6 | P3 | git 残留分支 ×5（已并入 master）：feat/consolidation-thinking-guard、feat/memory-seam-s1、feat/memory-seam-s1-pre-cleanup、feat/settings-section-ui、feature/injection-isolation | git-guardrails 流程：本地 branch -D + push origin --delete | ✅ 2026-09-08（本地 5 + 远程 3 已删） |
 | ACP-B7 | P1-4 记录 | maid 折叠归档（single_observation）回流注入风险：T2 权威闸门（observationAuthorities 默认 [user_explicit,user_correction]）当前客观挡下，archiver 无 kind=maid-checkpoint 标记；audit 报告 P1-4 未落刀也未记录豁免 | 本行即豁免记录：放宽 observationAuthorities 白名单前必须重开 P1-4（maid 归档侧加 metadata kind + composer 排除/降权）——maid 仓库交叉引用 | 已记录（条件触发） |
 | ACP-B8 | 计划 | C7 注入集稳定性观测（turnover）：相邻 step 注入集去重率/Jaccard | composer.mjs telemetry 补集上报（对齐 WC registerWorkStateInjection 先例）；injectScheduler 已可记账 | planned |
-| ACP-B9 | 计划 | S2 memento 迁移/退役（观察期后）：摘 memento bundle、归档 .dsh/dsh-memento、删 .dsh-meow、memory 工具消失语义 | 见 docs/PLAN-S2-MIGRATION.md（§5 退役步骤 1-4）；D1 已拍板并执行（2026-09-08 步5 清空完成，观察期 2 周自重启起算） | open（观察期满后退役） |
+| ACP-B9 | ✅ 完成 | S2 memento 迁移/退役：L1 memento bundle + 数据归档、L2 shared-memory bundle + USER.md 归档、patch 清理、memory 工具消失语义 | ✅ 2026-09-08 提前执行完成（用户批准缩短观察窗，PLAN-S2 §5 修订版 8 步）：USER.md→archive/memories-shared-layer-20260908、memory.db→archive/dsh-memento-20260908、pnpm -52 包；重启验证 memory 工具消失 + 11 画像 observation 注入就绪；回滚 = package.json.bak-memento-exit-20260908 + archive | ✅ 2026-09-08 |
 | ACP-B10 | 计划 | T4 重启实测后续：当前 active 规则为空 → rules 注入段无样本；待有规则后复查注入/草拟管线//acp rule 命令 | 有 active 规则后验证（S1-S6 种子场景已由测试覆盖，需 live 复查） | planned |
 | ACP-B11 | 计划 | 反馈通道 V1.1：新 user_correction 与 active 规则 lexical 重叠 ≥0.6 → 提示"规则 X 似乎没生效"（与 C5 共用种子） | t4 计划 M7 扩展；V1.0 稳定后排期 | 未排期 |
 | ACP-B12 | 保留 | types.d.ts 空壳（package.json 声明 types）：等 harness 收录 acp/* 事件词汇后启用 | 保持现状；harness 支持后做 declaration merging | 保留 |
