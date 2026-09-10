@@ -11,7 +11,7 @@
 |---|---|---|
 | 0.2.0 | 3025ad9 | S1/S2 memory-seam：acp_query+读审计、observation 轨 schema v5、memento 迁移管道、设置顶层 section、golden regression |
 | 0.3.0 | 2639d85 | T4 反馈通道（rule schema v6 / 草拟 G1-G2 / /acp rule 审批 / composer rules 段）+ T1-T3 修复集 |
-| 0.4.0 | — | 待办合流（下表），版本决议：修复集不单独 bump，随特性里程碑收口 |
+| 0.4.0 | （本提交） | 注入/蒸馏质量治理：蒸馏非放大（observation 权威取支撑证据最弱值）、RRF 秩融合（fusion=rrf，默认仍 weighted）、高权威条目不截断、一次性任务指令不进画像（阶段 2.3，默认 shadow 已切 on）；安全审计修复 H-4/H-5；backlog 收口 B1/B4/B5/B9/B13；同行调研 PEER-SURVEY-20260909 |
 
 ## 待办（Backlog）
 
