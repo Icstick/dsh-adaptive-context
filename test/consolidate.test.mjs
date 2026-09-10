@@ -338,7 +338,7 @@ test('parseObservations：显式空数组 = 合法空产（P1-4 回归：动作�
   assert.equal(empty.ok, true)
   assert.equal(empty.observations.length, 0)
   // markdown fence 包裹的空数组同样合法
-  assert.equal(parseObservations('\`\`\`json\n{"observations":[]}\n\`\`\`').ok, true)
+  assert.equal(parseObservations('```json\n{"observations":[]}\n```').ok, true)
   // 非空数组但条目全部字段非法 → 偏离 schema 契约，仍判失败（保留重试）
   const garbage = parseObservations('{"observations":[{"subject":"","predicate":"","claimDomain":"bad","text":""}]}')
   assert.equal(garbage.ok, false)

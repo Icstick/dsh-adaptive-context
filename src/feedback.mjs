@@ -150,7 +150,7 @@ export const DRAFT_SYSTEM = [
 export function parseDraftJson(text) {
   if (!text) return null
   let t = String(text).trim()
-  const fence = t.match(/\`\`\`(?:json)?\s*([\s\S]*?)\`\`\`/)
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fence) t = fence[1].trim()
   const start = t.indexOf('[')
   if (start < 0) return null

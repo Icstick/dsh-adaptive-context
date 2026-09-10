@@ -75,14 +75,14 @@ test('acp_query：content 截断与 limit 生效', () => {
 })
 
 test('acp_query：service recall 路径（readGuard）', () => {
-  const { acp, ledger } = makeEnv()
+  const { ledger } = makeEnv()
   ledger.append({ ...BASE, authority: 'user_explicit', claimDomain: 'user_fact', content: '用户偏好伏特加口味' })
   const r = queryLedgerForTool({ ledger }, { query: '伏特加' })
   assert.equal(r.evidence.length, 1)
 })
 
 test('buildAcpQueryToolSpec：rc.1 形状 + execute + 读审计', async () => {
-  const { acp, ledger } = makeEnv()
+  const { ledger } = makeEnv()
   ledger.append({ ...BASE, authority: 'user_explicit', claimDomain: 'user_fact', content: '审计测试内容' })
   const tool = buildAcpQueryToolSpec({ ledger, auditStore: ledger.auditStore, scopeId: 'user-global' })
   assert.equal(tool.name, 'acp_query')
@@ -96,6 +96,3 @@ test('buildAcpQueryToolSpec：rc.1 形状 + execute + 读审计', async () => {
   assert.equal(audit.items[0].op, 'model_query')
 })
 
-async function await_tool(tool, input) {
-  return tool.handler(input)
-}

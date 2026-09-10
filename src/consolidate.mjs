@@ -234,7 +234,8 @@ function findCandidateForEvidenceIds(candidateStore, scopeId, evidenceIds) {
  *      promote → autoPromote；否则 → pending_promotion（manual 路径）。
  * @returns {'pending'|'auto-promoted'|'promoted'|string} 处理结果（测试/日志用）
  */
-function handleStyleCandidate({ obs, ledger, candidateStore, auditStore, policyEvaluate, autoPromote, scopeId, logger }) {
+// auditStore：调用方仍按此键传入（保留键位兼容），本函数当前不使用 → 绑定加下划线前缀。
+function handleStyleCandidate({ obs, ledger, candidateStore, auditStore: _auditStore, policyEvaluate, autoPromote, scopeId, logger }) {
   const evidenceIds = Array.isArray(obs.evidenceIds) ? obs.evidenceIds : []
   if (!candidateStore || typeof policyEvaluate !== 'function') {
     for (const evId of evidenceIds) markPending(ledger, evId, logger)
@@ -501,6 +502,10 @@ export function createConsolidator(opts = {}) {
         }
       }
 
+      // T2.5 硬过滤命中数：此前只累加不落地（死变量），改为 debug 留痕便于观测
+      if (flowSkipped > 0) {
+        logger?.debug?.('[acp] consolidation 丢弃动作流水 observation ' + flowSkipped + ' 条（T2.5 硬过滤）')
+      }
       advanceWatermark(evidences)
       const failuresBefore = recordSuccess(evidences.length, wrote)
       return { ran: true, digested: evidences.length, observations: wrote, failuresBefore }

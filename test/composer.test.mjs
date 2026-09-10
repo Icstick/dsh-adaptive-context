@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import {
   compose, lexicalScore, utilityOf, renderSourceLabelled, sectionOf, shortSessionId,
 } from '../src/composer.mjs'
-import { packBySection, estimateTokens, MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET } from '../src/budget.mjs'
+import { packBySection, estimateTokens, MVP_TOTAL_BUDGET } from '../src/budget.mjs'
 
 const ev = (over = {}) => ({
   id: 'ev_1',

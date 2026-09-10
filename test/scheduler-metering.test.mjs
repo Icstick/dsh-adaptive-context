@@ -31,7 +31,7 @@ function fakeScheduler(overrides = {}) {
   return api
 }
 
-test('S1 P7 registerAcpSection：scheduler 就绪即注册（参数契约：order 10/tokens/hotTokens 透传）', (t) => {
+test('S1 P7 registerAcpSection：scheduler 就绪即注册（参数契约：order 10/tokens/hotTokens 透传）', () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   registerAcpSection(ctx, { hotTokens: 1600 })
@@ -47,16 +47,15 @@ test('S1 P7 registerAcpSection：scheduler 就绪即注册（参数契约：orde
   })
 })
 
-test('S1 P7 registerAcpSection：缺省 hotTokens → 900（Config 默认）', (t) => {
+test('S1 P7 registerAcpSection：缺省 hotTokens → 900（Config 默认）', () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   registerAcpSection(ctx, {})
   assert.equal(sched.calls.sections[0].budgetChars, 900)
 })
 
-test('S1 P7 registerAcpSection：scheduler 未就绪 → 订阅 internal/service，就绪事件到达后注册', (t) => {
+test('S1 P7 registerAcpSection：scheduler 未就绪 → 订阅 internal/service，就绪事件到达后注册', () => {
   const handlers = []
-  let sched = null
   const services = {}
   const ctx = mockCtx(services, handlers)
   // get 动态读 services（事件到达后注入）
@@ -75,7 +74,7 @@ test('S1 P7 registerAcpSection：scheduler 从未出现 → 静默（不抛、�
   assert.doesNotThrow(() => registerAcpSection(ctx, {}))
 })
 
-test('S1 P7 reportInjectionToScheduler：注入后上报 body 实际字符', async (t) => {
+test('S1 P7 reportInjectionToScheduler：注入后上报 body 实际字符', async () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   const body = '用户偏好：中文交流，先结论后理由。'
@@ -89,7 +88,7 @@ test('S1 P7 reportInjectionToScheduler：注入后上报 body 实际字符', asy
   })
 })
 
-test('S1 P7 reportInjectionToScheduler：空 sessionId → 不传（落 global 槽）', async (t) => {
+test('S1 P7 reportInjectionToScheduler：空 sessionId → 不传（落 global 槽）', async () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   reportInjectionToScheduler(ctx, '', '无会话上下文')
@@ -100,7 +99,7 @@ test('S1 P7 reportInjectionToScheduler：空 sessionId → 不传（落 global �
   assert.equal(call.injectedChars, '无会话上下文'.length)
 })
 
-test('S1 P7 reportInjectionToScheduler：空 body 不报', async (t) => {
+test('S1 P7 reportInjectionToScheduler：空 body 不报', async () => {
   const sched = fakeScheduler()
   const ctx = mockCtx({ injectScheduler: sched })
   reportInjectionToScheduler(ctx, 'session-1', '')
@@ -110,13 +109,13 @@ test('S1 P7 reportInjectionToScheduler：空 body 不报', async (t) => {
   assert.equal(sched.calls.usage.length, 0)
 })
 
-test('S1 P7 reportInjectionToScheduler：scheduler 缺失 → 静默降级', async (t) => {
+test('S1 P7 reportInjectionToScheduler：scheduler 缺失 → 静默降级', async () => {
   const ctx = mockCtx({})
   assert.doesNotThrow(() => reportInjectionToScheduler(ctx, 'session-1', '有内容'))
   await new Promise((r) => setTimeout(r, 5))
 })
 
-test('S1 P7 reportInjectionToScheduler：recordUsage 故障（reject）→ 不阻断（fail-open）', async (t) => {
+test('S1 P7 reportInjectionToScheduler：recordUsage 故障（reject）→ 不阻断（fail-open）', async () => {
   const sched = fakeScheduler({
     recordUsage: async () => { throw new Error('storage down') },
   })

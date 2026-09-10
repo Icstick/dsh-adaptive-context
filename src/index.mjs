@@ -747,7 +747,7 @@ export const RULE_CMD_USAGE = [
 ].join('\n')
 
 /** 渲染规则列表（draft 序号可操作；active 附后参考） */
-export function renderRuleList(ruleStore, opts = {}) {
+export function renderRuleList(ruleStore, _opts = {}) { // opts 预留（调用方当前只传 ruleStore）
   const draft = ruleStore.queryRules({ state: 'draft', limit: 50 }).items
   const active = ruleStore.queryRules({ state: 'active', limit: 10 }).items
   const lines = []

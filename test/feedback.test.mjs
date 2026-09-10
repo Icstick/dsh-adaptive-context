@@ -7,7 +7,7 @@ import path from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
 import {
   RULE_PREFIXES, g2KeyOf, isExplicitRuleRequest,
-  collectRuleCandidates, fallbackRuleText, draftRuleFromEvidence,
+  collectRuleCandidates, draftRuleFromEvidence,
   maybeDraft, parseDraftJson, DRAFT_MAX_RUNS_PER_DAY,
 } from '../src/feedback.mjs'
 
@@ -135,7 +135,7 @@ test('maybeDraft：日限节流（同天已达上限 → daily_cap 短路）', a
 })
 
 test('parseDraftJson：剥 markdown fence / 前后杂文；非法 → null', () => {
-  assert.deepEqual(parseDraftJson('\`\`\`json\n[{"domain":"workflow"}]\n\`\`\`'), [{ domain: 'workflow' }])
+  assert.deepEqual(parseDraftJson('```json\n[{"domain":"workflow"}]\n```'), [{ domain: 'workflow' }])
   assert.deepEqual(parseDraftJson('前缀杂文 [{"a":1}] 后缀'), [{ a: 1 }])
   assert.equal(parseDraftJson('没有数组'), null)
   assert.equal(parseDraftJson('[broken'), null)

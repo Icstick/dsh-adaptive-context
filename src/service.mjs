@@ -3,7 +3,7 @@
 // 写路径经 governance.writeGuard 判定后再落 Ledger（先 validate 后 write）。
 
 import { writeGuard, readGuard } from './governance.mjs'
-import { supersede, quarantine, redact, rollback, getLineage } from './lifecycle.mjs'
+import { supersede, redact, rollback, getLineage } from './lifecycle.mjs'
 import { SCOPES } from './constants.mjs'
 import { exportJsonl, importJsonl } from './export-import.mjs'
 import { rebuildView, verifyView } from './rebuild.mjs'
@@ -344,7 +344,7 @@ export function createAcpService({ ledger, startupRebuild = true }) {
      */
     delete(id) {
       try {
-        const row = redact(id, { ledger })
+        redact(id, { ledger }) // 副作用调用（返回值由下面 getById 统一给）
         if (typeof ledger.updateMetadata === 'function') {
           ledger.updateMetadata(id, { reviewStatus: 'deleted_by_user' })
         }

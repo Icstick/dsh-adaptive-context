@@ -186,8 +186,8 @@ export function buildAcpQueryToolSpec(deps = {}) {
     },
     output: { schema: OUTPUT_SCHEMA, render },
     execute(args) {
-      const res = queryLedgerForTool(deps, { ...(args || {}), scopeId })
-      auditQuery(deps, { ...(args || {}), scopeId }, res)
+      const res = queryLedgerForTool(deps, { ...args, scopeId })
+      auditQuery(deps, { ...args, scopeId }, res)
       return Promise.resolve(res)
     },
   }

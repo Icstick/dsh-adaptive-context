@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
-import { handleRuleReviewCommand, renderRuleList, RULE_CMD_USAGE } from '../src/index.mjs'
+import { handleRuleReviewCommand, RULE_CMD_USAGE } from '../src/index.mjs'
 
 function fresh(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'acp-cmd-'))

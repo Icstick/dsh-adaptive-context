@@ -179,7 +179,7 @@ function makeSection(scope) {
     function onDraft(name, text) {
       setFailed(false)
       setDrafts((prev) => {
-        const next = { ...(prev ?? {}) }
+        const next = { ...prev }
         next[name] = text
         return next
       })
@@ -187,7 +187,7 @@ function makeSection(scope) {
     function onReset(name) {
       setFailed(false)
       setDrafts((prev) => {
-        const next = { ...(prev ?? {}) }
+        const next = { ...prev }
         next[name] = '' // 空草稿 = unset
         return next
       })

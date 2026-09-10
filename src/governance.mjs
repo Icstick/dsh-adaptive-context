@@ -7,7 +7,7 @@ import { MAX_EVIDENCE_CONTENT_CHARS, CLAIM_DOMAINS } from './constants.mjs'
 
 // --- 确定性 secret/PII 模式（保守，宁可 quarantine 也不放行） ---
 const SECRET_PATTERNS = [
-  /\b(?:sk|pk|api[_-]?key|token|secret|password|passwd|pwd|credential|bearer|private[_-]?key|access[_-]?key)\b\s*[:=]\s*['"]?[A-Za-z0-9_\-]{12,}/i,
+  /\b(?:sk|pk|api[_-]?key|token|secret|password|passwd|pwd|credential|bearer|private[_-]?key|access[_-]?key)\b\s*[:=]\s*['"]?[A-Za-z0-9_-]{12,}/i,
   /\bghp_[A-Za-z0-9]{20,}\b/,                 // GitHub PAT
   /\bgho_\w{20,}\b/,
   /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,         // Slack token

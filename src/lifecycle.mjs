@@ -85,7 +85,7 @@ export function supersede(oldId, newId, { ledger } = {}) {
     fail(ERROR_CODES.INVALID_INPUT, 'supersede: cannot supersede an evidence with itself')
   }
 
-  const old = requireEvidence(ledger, oldId, 'supersede: old')
+  requireEvidence(ledger, oldId, 'supersede: old') // 存在性校验（不取返回值）
   const nu = requireEvidence(ledger, newId, 'supersede: new')
 
   if (!SUPERSEDE_AUTHORITIES.includes(nu.authority)) {

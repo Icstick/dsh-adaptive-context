@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
-import { createRuleStore, ruleIdOf, RULE_STATES, RULE_TRANSITIONS } from '../src/rule.mjs'
+import { createRuleStore } from '../src/rule.mjs'
 import { renderRulesView, viewFileName, writeRulesDir } from '../src/rules.mjs'
 import { AUDIT_OPS } from '../src/audit.mjs'
 

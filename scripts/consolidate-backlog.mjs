@@ -117,7 +117,7 @@ export function loadApiKey(envName, { fromCredentials = false } = {}) {
   if (!existsSync(cred)) return null
   const text = readFileSync(cred, 'utf8')
   // 迷你 YAML：refs 段下的 KEY: value 行（容忍引号）
-  const re = new RegExp('^\\s*' + envName + '\\s*:\\s*[\'\"\\n]?([^\'\"\\n]+)', 'm')
+  const re = new RegExp('^\\s*' + envName + '\\s*:\\s*[\'"\\n]?([^\'"\\n]+)', 'm')
   const m = text.match(re)
   return m ? { key: m[1].trim(), source: 'credentials' } : null
 }
