@@ -170,7 +170,7 @@ pnpm install
 | `hotTokens` | number | 900 | 热路径注入预算（tokens/轮）。2026-09-02 P0-5：默认对齐 MVP 总预算 900（此前文档写 300 且 composer 从不读取，实际配额合计一直是 900） |
 | `observationInjection` | boolean | false | observation 蒸馏轨注入开关（2026-09-02 决策：默认冻结；接线已就位，打开即用）。生产实例经 profile patch 开启并配权威白名单与配额 |
 | `observationAuthorities` | array | ["user_explicit","user_correction"] | T2（2026-09-07）：observation 注入权威闸门——只放行高权威蒸馏轨；single_observation 等低权威不进常规注入（留账本供 acp_query）。语义：开闸≠全量开 |
-| `sectionQuota` | object | MVP_SECTION_QUOTA（user_model 180 / work_state 250 / memory 350 / expression 120，合计 900） | section 配额覆盖（S1 P2）：如 `{ user_model: 800 }`；总预算仍由 hotTokens 控制（注：provenance 配额已于 2026-09-02 删除——sectionOf 从不产出，是死配额） |
+| `sectionQuota` | object | MVP_SECTION_QUOTA（user_model 180 / work_state 250 / memory 290 / expression 120 / rules 60，合计 900） | section 配额覆盖（S1 P2）：如 `{ user_model: 800 }`；总预算仍由 hotTokens 控制（注：provenance 配额已于 2026-09-02 删除——sectionOf 从不产出，是死配额；T4 2026-09-07 新增 rules 段 60，memory 350→290 让渡，总额仍 900 不回退） |
 | `recallLimit` | number | 20 | 每个记忆源的召回候选上限 |
 | `targetDomain` | enum | work | **DEPRECATED（2026-09-07）**：读侧资格矩阵已按候选自身 claimDomain 自然分组，本键不再影响注入；保留键位仅为兼容存量配置/设置页 |
 | `debug` | boolean | false | 调试日志 |
@@ -217,7 +217,9 @@ pnpm install
 | `import(jsonlText)` | 导入（证据按内容哈希幂等，重复不落） |
 | `correct(input)` | 用户纠正：写入纠正证据 + 立即取代旧证据 |
 | `release(id)` / `rollback(id)` / `redact(id)` / `delete(id)` | 用户权利操作（释放隔离/回滚/脱敏/删除） |
+| `queryObservations({scopeId, state, claimDomain, authorities, limit, order})` | 查蒸馏 Observation 轨（T2 权威闸门：`authorities` IN 过滤；跨插件取高权威画像的公开入口，如 maid PIN 钉扎） |
 | `audit({op, scopeId, actor, limit})` | 查审计 |
+| `startupVerify()` | 启动校验物化视图与 candidate 重放一致；失配且 `startupRebuild=true`（缺省）→ 自动重建 + audit。返回 `{ok, checksum, rebuilt, reason?}` |
 | `rebuild(viewName)` | 手动重建物化视图（视图随时可以重建） |
 | `exportActive(scopeId)` | 只导出生效中的证据（便捷方法） |
 
