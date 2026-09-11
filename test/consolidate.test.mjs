@@ -659,4 +659,91 @@ test('consolidation 成功后 fail_count 归零并写 audit（不再只增不减
   assert.equal(okAudit.payload.failuresBefore, 1)
 })
 
+
+// ===================== 可观测性（2026-09-11）=====================
+// 背景：audit payload 原先只记 batchSize，导致「处理过但没产出 observation」与
+// 「被水位线跳过」在数据上不可区分——2026-09-11 的体检就因此误报过 56% 欠账。
+// 修法：成功/失败审计行都记录批次的时间区间与首尾 id。
+
+function batchIds(ledger) {
+  const items = ledger.query({ scopeId: 'user-global', state: 'active' }).items
+  return items.slice().sort((a, b) => String(a.observedAt).localeCompare(String(b.observedAt)))
+}
+
+function makeAudits() {
+  const audits = []
+  return { audits, auditStore: { appendAudit: (row) => audits.push(row) } }
+}
+
+test('audit 成功行记录批次区间与首尾 id；水位线只推进到本批最大 observedAt', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 3)
+  const { audits, auditStore } = makeAudits()
+  const llmCall = async () => JSON.stringify({
+    observations: [{ subject: '用户', predicate: '偏好', claimDomain: 'user_fact', text: '用户偏好 pnpm' }],
+  })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 99, llmCall, auditStore })
+  await c.runOnce()
+
+  const ok = audits.find((a) => a.reason === 'consolidation ok; watermark advanced')
+  assert.ok(ok, '成功应写 audit')
+  const ids = batchIds(ledger)
+  assert.equal(ok.payload.batchSize, 3)
+  assert.equal(ok.payload.batchFrom, '', '首次运行前无水位线，下界为空串')
+  assert.equal(ok.payload.batchTo, ids[ids.length - 1].observedAt, '上界 = 本批最大 observedAt')
+  assert.equal(ok.payload.batchFirstId, ids[0].id)
+  assert.equal(ok.payload.batchLastId, ids[ids.length - 1].id)
+  assert.equal(ledger.getMeta('consolidation_watermark_ts'), ids[ids.length - 1].observedAt,
+    '水位线是批次上界，不是 now')
+})
+
+test('「处理过但零产出」也留痕：批次被记录，证据不再是黑盒', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  const { audits, auditStore } = makeAudits()
+  const llmCall = async () => JSON.stringify({ observations: [] })
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 99, llmCall, auditStore })
+  const r = await c.runOnce()
+
+  const ok = audits.find((a) => a.reason === 'consolidation ok; watermark advanced')
+  assert.ok(ok, '零产出仍算成功消化，必须留痕——否则无法与「被跳过」区分')
+  assert.equal(ok.payload.observations, 0)
+  assert.equal(ok.payload.batchSize, 2)
+  assert.ok(ok.payload.batchTo, '零产出批次同样要记上界，体检脚本才能判定证据已被处理')
+  assert.equal(r.digested, 2)
+})
+
+test('failure audit 记录批次区间，且水位线不动', async (t) => {
+  const ledger = freshLedger(t)
+  addEvidence(ledger, 2)
+  const { audits, auditStore } = makeAudits()
+  const llmCall = async () => '这不是 JSON'
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 99, llmCall, auditStore })
+  const r = await c.runOnce()
+
+  assert.equal(r.reason, 'llm_failed')
+  const bad = audits.find((a) => a.reason === 'consolidation failed; watermark not advanced')
+  assert.ok(bad, '失败应写 audit')
+  assert.equal(bad.payload.batchSize, 2)
+  assert.equal(bad.payload.batchFirstId, batchIds(ledger)[0].id, '失败批次也要能追溯到具体证据')
+  assert.equal(ledger.getMeta('consolidation_watermark_ts'), null, '失败不推进水位线')
+})
+
+test('空批次不写水位线：不再把水位线盖到 now（防回填/时钟偏移被静默跳过）', async (t) => {
+  const ledger = freshLedger(t)
+  const c = createConsolidator({ ledger, minEvidence: 1, minTurns: 1, llmCall: null })
+
+  const r1 = await c.runOnce()
+  assert.equal(r1.ran, true)
+  assert.equal(ledger.getMeta('consolidation_watermark_ts'), null, '空队列不该凭空写入 now')
+
+  addEvidence(ledger, 1)
+  await c.runOnce()
+  const wm = ledger.getMeta('consolidation_watermark_ts')
+  assert.ok(wm, '有证据后应正常推进')
+  const r3 = await c.runOnce()
+  assert.equal(r3.digested, 0)
+  assert.equal(ledger.getMeta('consolidation_watermark_ts'), wm, '空批次后水位线必须原地不动')
+})
+
 console.log('\nAll consolidation tests passed.')

@@ -394,7 +394,7 @@ export function createConsolidator(opts = {}) {
    * 历史里只剩 58 条 failure 行，无从判断最近一次蒸馏发生在何时。
    * 现值语义 = 连续失败次数：成功即归零并清除 last_failure。
    */
-  function recordSuccess(digested, observations) {
+  function recordSuccess(batch, observations) {
     const failuresBefore = readFailCount()
     if (failuresBefore > 0) writeMeta(CONSOLIDATION_META_FAIL_COUNT, '0')
     if (failuresBefore > 0) writeMeta(CONSOLIDATION_META_LAST_FAILURE, '')
@@ -404,7 +404,14 @@ export function createConsolidator(opts = {}) {
         scopeId,
         actor: 'consolidation',
         reason: 'consolidation ok; watermark advanced',
-        payload: { batchSize: digested, observations, failuresBefore },
+        // 2026-09-11：payload 补批次区间与首尾 id。原先只记 batchSize，导致
+        // 「处理过但零产出 observation」与「被水位线跳过」在数据上不可区分，
+        // 体检脚本无法判定欠账真伪（2026-09-11 误报 56% 欠账的根因）。
+        payload: {
+          batchSize: batch.size, observations, failuresBefore,
+          batchFrom: batch.from, batchTo: batch.to,
+          batchFirstId: batch.firstId, batchLastId: batch.lastId,
+        },
       })
     } catch (err) {
       logger?.warn?.('[acp] consolidation success audit write error: ' + (err && err.message))
@@ -412,7 +419,8 @@ export function createConsolidator(opts = {}) {
     return failuresBefore
   }
 
-  function recordFailure(batchSize, error) {
+  function recordFailure(batch, error) {
+    const batchSize = batch.size
     const n = Number(readMeta(CONSOLIDATION_META_FAIL_COUNT) ?? 0)
     writeMeta(CONSOLIDATION_META_FAIL_COUNT, String((Number.isFinite(n) ? n : 0) + 1))
     writeMeta(CONSOLIDATION_META_LAST_FAILURE, JSON.stringify({
@@ -426,20 +434,34 @@ export function createConsolidator(opts = {}) {
         scopeId,
         actor: 'consolidation',
         reason: 'consolidation failed; watermark not advanced',
-        payload: { batchSize, error: String(error ?? 'unknown') },
+        // 失败批次同样记录区间与首尾 id：这批会被原样重试，留痕才能对账
+        payload: {
+          batchSize, error: String(error ?? 'unknown'),
+          batchFrom: batch.from, batchTo: batch.to,
+          batchFirstId: batch.firstId, batchLastId: batch.lastId,
+        },
       })
     } catch (err) {
       logger?.warn?.('[acp] consolidation failure audit write error: ' + (err && err.message))
     }
   }
 
+  /**
+   * 推进水位线到本批最大 observedAt，返回 {from, to, advanced}。
+   * 2026-09-11：空批次**绝不**再写 now（旧实现是 writeMeta(max || new Date().toISOString())）。
+   * 那会把水位线盖到当下，任何 observedAt 早于 now 的证据（回填、时钟偏移、时区边界）
+   * 都会被永久静默跳过，事后还无法从审计里看出来。
+   */
   function advanceWatermark(evidences) {
+    const from = readMeta(CONSOLIDATION_META_WATERMARK_TS) || ''
     let max = ''
     for (const ev of evidences) {
       const t = ev.observedAt ?? ''
       if (t > max) max = t
     }
-    writeMeta(CONSOLIDATION_META_WATERMARK_TS, max || new Date().toISOString())
+    if (!max) return { from, to: from, advanced: false }
+    writeMeta(CONSOLIDATION_META_WATERMARK_TS, max)
+    return { from, to: max, advanced: true }
   }
 
   function resetTurns() {
@@ -465,17 +487,26 @@ export function createConsolidator(opts = {}) {
       const evidences = nextBatch()
       resetTurns() // 已消费本次触发的 turn 计数
       if (evidences.length === 0) {
-        advanceWatermark([])
+        // 空批次不写水位线（旧行为会盖成 now，见 advanceWatermark 注释）
         return { ran: true, digested: 0, observations: 0 }
       }
       recordRun()
+
+      /** 本批的可追溯描述：供审计留痕，并区分「已处理」与「被跳过」 */
+      const batch = {
+        size: evidences.length,
+        from: readMeta(CONSOLIDATION_META_WATERMARK_TS) || '',
+        to: '',
+        firstId: evidences[0]?.id ?? null,
+        lastId: evidences[evidences.length - 1]?.id ?? null,
+      }
 
       let observations
       if (currentLlmCall) {
         const derived = await deriveViaLlm(evidences, currentLlmCall, logger, maxContentChars)
         if (!derived.ok) {
           // P0-1：LLM 失败 → **不推进水位**，这批留给下一轮重试；失败留痕可 grep。
-          recordFailure(evidences.length, derived.error)
+          recordFailure(batch, derived.error)
           return { ran: true, digested: 0, observations: 0, reason: 'llm_failed' }
         }
         observations = derived.observations
@@ -506,8 +537,8 @@ export function createConsolidator(opts = {}) {
       if (flowSkipped > 0) {
         logger?.debug?.('[acp] consolidation 丢弃动作流水 observation ' + flowSkipped + ' 条（T2.5 硬过滤）')
       }
-      advanceWatermark(evidences)
-      const failuresBefore = recordSuccess(evidences.length, wrote)
+      batch.to = advanceWatermark(evidences).to
+      const failuresBefore = recordSuccess(batch, wrote)
       return { ran: true, digested: evidences.length, observations: wrote, failuresBefore }
     } finally {
       running = false

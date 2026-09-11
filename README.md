@@ -202,6 +202,7 @@ pnpm install
 - **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计
 - **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
 - **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导，**取支撑证据中最弱的一条**（2026-09-09 非放大规则，防弱证据洗白强权威）；注入侧只放行白名单权威（T2）
+- **审计可对账（2026-09-11）**：consolidation 的成功/失败审计行都带批次区间与首尾证据 id（`batchFrom`/`batchTo`/`batchFirstId`/`batchLastId`）——用来区分「已处理但零产出」与「被水位线跳过」；水位线只推进到**本批最大 observedAt**，空批次不写（旧实现会盖成 now，任何早于 now 的回填/时钟偏移证据都会被静默跳过）
 
 ## API（ctx.acp）
 
