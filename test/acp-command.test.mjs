@@ -75,3 +75,19 @@ test('越界序号 / 非法输入 → error + usage', (t) => {
   const usage = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'bogus')
   assert.equal(usage.text, RULE_CMD_USAGE)
 })
+
+test('rebuild → 调 onChanged 重建视图；onChanged 失败返回 error 不抛', (t) => {
+  const ledger = fresh(t)
+  let changed = 0
+  const ok = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule rebuild', {
+    onChanged: () => { changed += 1; return true },
+  })
+  assert.equal(ok.kind, 'success')
+  assert.ok(ok.text.includes('已重建'))
+  assert.equal(changed, 1, 'rebuild 必须触发视图重建回调')
+  const fail = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule rebuild', { onChanged: () => false })
+  assert.equal(fail.kind, 'error')
+  assert.ok(fail.text.includes('失败'))
+  const bare = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule rebuild')
+  assert.equal(bare.kind, 'success', '未接线 onChanged 时也不抛')
+})

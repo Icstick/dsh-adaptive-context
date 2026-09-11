@@ -743,7 +743,8 @@ export const RULE_CMD_USAGE = [
   '  list              列出规则草案（draft，可审批）',
   '  accept <n>        审批通过第 n 条草案（→ active，视图重建 + 审计）',
   '  reject <n>        拒绝第 n 条草案（→ rejected + 审计）',
-  '示例：/acp rule list → /acp rule accept 1',
+  '  rebuild           重建 rules/ 视图文件（规则经脚本/外部写入后刷新）',
+  '示例：/acp rule list → /acp rule accept 1 → /acp rule rebuild',
 ].join('\n')
 
 /** 渲染规则列表（draft 序号可操作；active 附后参考） */
@@ -805,6 +806,14 @@ export function handleRuleReviewCommand(ruleStore, auditStore, rawInput, opts = 
     opts.onChanged?.()
     return { kind: 'success', text: 'rule ' + sub + ' → ' + row.state + '：' + (row.title || String(row.text).slice(0, 30)) }
   }
+  if (sub === 'rebuild') {
+    // D（2026-09-11 B10 复查）：规则经脚本/外部写入（非 /acp rule accept 路径）后 rules/ 视图不刷新。
+    // 显式重建入口；视图本可从 ledger 重建，失败返回 error 不抛（onChanged 内部已 warn）。
+    const ok = opts.onChanged?.()
+    return ok === false
+      ? { kind: 'error', text: 'rules/ 视图重建失败（见插件日志 warn: rules_view_write_failed）' }
+      : { kind: 'success', text: 'rules/ 视图已重建（active 规则按 domain 落盘）' }
+  }
   return { kind: 'success', text: RULE_CMD_USAGE }
 }
 
@@ -814,8 +823,8 @@ export function registerRuleReviewCommand(ctx, ledger, onChanged) {
     if (!commands || typeof commands.register !== 'function') return
     commands.register({
       name: 'acp',
-      description: 'ACP 规则草案审批（list/accept/reject）',
-      input: { hint: '/acp rule list | /acp rule accept <n> | /acp rule reject <n>' },
+      description: 'ACP 规则草案审批（list/accept/reject/rebuild）',
+      input: { hint: '/acp rule list | /acp rule accept <n> | /acp rule reject <n> | /acp rule rebuild' },
       handler: async (invocation) => {
         try {
           return handleRuleReviewCommand(
