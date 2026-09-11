@@ -22,7 +22,7 @@ async function* errorFinishStream() {
   yield { type: 'finish', reason: { kind: 'error', failure: { code: 'EMPTY' } } }
 }
 
-/** 记录每次 stream 调用的 provider/model */
+/** 记录每次 stream 调用的 provider/model（并留存 messages，供 source 词表断言） */
 function recordingLlm(streamImpl) {
   const calls = []
   return {
@@ -33,6 +33,7 @@ function recordingLlm(streamImpl) {
         model: options.model,
         purpose: options.purpose,
         reasoningEffort: options.reasoningEffort,
+        messages: options.messages,
       })
       return streamImpl()
     },
@@ -164,6 +165,16 @@ test('task 未配置路由 → callFor reject', async () => {
     router.callFor('reflect', 'u', 's'),
     /has no route/,
   )
+})
+
+// —— form 词表纪律（2026-09-10 事故）：注入消息只声明官方语义闭集值 ——
+test('callLlmText：注入消息 source 不自造 form（表外值会让会话迁移拒收整条会话）', async () => {
+  const llm = recordingLlm(() => okStream('ok'))
+  await callLlmText(llm, { provider: 'deepseek', model: 'chat' }, 'u', 's')
+  const source = llm.calls[0].messages[0].source
+  assert.equal(source.kind, 'plugin')
+  assert.equal(source.plugin, 'dsh-adaptive-context')
+  assert.equal(source.form, undefined, 'form 是官方词表，自造值禁止')
 })
 
 test('callLlmText 直接调用：空文本输出 → 抛错', async () => {

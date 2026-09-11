@@ -36,9 +36,12 @@ export async function callLlmText(llm, route, userText, system) {
   // reasoningEffort=high，思考输出与正文共用 maxTokens 预算（12288），实测可被
   // 长思考吃满导致 finish=length 连败（2026-09-06 22:30 实例）；路由可覆盖。
   const reasoningEffort = route.reasoningEffort ?? 'off'
+  // 2026-09-10：去掉自造值 form:'consolidation'——form 是官方语义闭集词表
+  // （instructions/catalog/snapshot/notice/relay/recall），表外的值会让
+  // session-format 的 v2→v3 迁移拒收**整条会话**。不声明 form 属官方默认。
   const messages = [createUserMessage({
     content: [{ type: 'text', text: userText }],
-    source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'consolidation' },
+    source: { kind: 'plugin', plugin: 'dsh-adaptive-context' },
   })]
   const controller = new AbortController()
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
