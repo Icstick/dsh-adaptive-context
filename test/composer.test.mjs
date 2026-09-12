@@ -405,6 +405,40 @@ test('B8：jaccard 边界（双方空=1；完全相同=1；不相交=0；部分�
   assert.equal(jaccard(null, undefined), 1)
 })
 
+// ===================== 2026-09-12：observation 时间衰减 + C3 滞回 =====================
+
+test('时间衰减：observation 按半衰期让位（30 天=半衰 / 90 天=1/8）；evidence 不衰减；0=关闭', () => {
+  const now = Date.parse('2026-09-12T00:00:00Z')
+  // workMatch=1 保证 relevance > 0（纯空 query 时 relevance 为 0，比值会退化 NaN）
+  const mk = (days, over = {}) => ({
+    sourceClass: 'observation', content: '经验甲甲甲', workMatch: 1,
+    observedAt: new Date(now - days * 86400000).toISOString(), ...over,
+  })
+  const off = { query: '', now, observationHalfLifeDays: 0 }
+  const hl30 = { query: '', now, observationHalfLifeDays: 30 }
+  const u = (days, opts) => utilityOf(mk(days), opts).utility
+  // 同一候选只切换半衰期 → 比值纯粹是 decay 因子（其他项两次完全相同）
+  assert.ok(Math.abs(u(30, hl30) / u(30, off) - 0.5) < 1e-9, '30 天 = 半衰')
+  assert.ok(Math.abs(u(90, hl30) / u(90, off) - 0.125) < 1e-9, '90 天 = 1/8')
+  assert.equal(u(0, hl30), u(0, off), '当天条目不受衰减（decay=1）')
+  // evidence（非 observation 轨）不衰减：同一老候选切换 halfLife 结果不变
+  // （注意不能拿不同 observedAt 比较——freshness 项是全局设计，evidence 也有新鲜度）
+  const evOld = mk(90, { sourceClass: undefined })
+  assert.equal(utilityOf(evOld, hl30).utility, utilityOf(evOld, off).utility, 'evidence 不老化')
+})
+
+test('C3 滞回：上一步在注入集的候选获粘性加成并优先（h=0 关闭）', () => {
+  const a = { id: 'a', scopeId: 'user-global', content: '内容甲甲甲', state: 'active' }
+  const b = { id: 'b', scopeId: 'user-global', content: '内容乙乙乙', state: 'active' }
+  const base = compose([a, b], { query: '无关词', scopeId: 'user-global' })
+  assert.equal(base.items.length, 2)
+  const withSticky = compose([a, b], { query: '无关词', scopeId: 'user-global', previousIds: ['b'], hysteresis: 0.2 })
+  assert.deepEqual(withSticky.items.map((c) => c.id), ['b', 'a'], '在位条目优先')
+  const stickyB = withSticky.items.find((c) => c.id === 'b')
+  assert.equal(stickyB.sticky, true)
+  assert.ok(stickyB.utility > base.items.find((c) => c.id === 'a').utility, '粘性加成提高 utility')
+})
+
 test('B8：compose 返回 admittedIds，与 items 一致且进入 telemetry', () => {
   // query 与候选正文不可互为子串（self-echo 过滤 T1：content 包含 query 也算），
   // 故用完全无关的查询词——本用例只验证 admittedIds 透出，不关心排序。

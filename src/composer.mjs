@@ -215,6 +215,17 @@ export function utilityOf(cand, opts = {}) {
   // 跨会话惩罚（2026-08-30，ISSUES-INJECTION-ISOLATION.md F7）：其他会话的候选
   // 即使进入注入，也大幅降权（0.3 系数），保证本会话内容占主导。
   if (cand.crossSession) utility *= CROSS_SESSION_PENALTY
+  // observation 时间衰减（2026-09-12，用户拍板）：老经验随时间让位。
+  // 仅 observation 轨（evidence 是事实，不老化）；半衰期可配，0 = 关闭。
+  // decay = 0.5^(ageDays / halfLife)：半衰期 30 天 → 90 天约 0.125，180 天约 0.016。
+  const halfLife = Number(opts.observationHalfLifeDays ?? 0)
+  if (cand.sourceClass === 'observation' && halfLife > 0 && cand.observedAt) {
+    const ts = new Date(cand.observedAt).getTime()
+    if (Number.isFinite(ts)) {
+      const ageDays = Math.max(0, ((opts.now ?? Date.now()) - ts) / 86400000)
+      utility *= Math.pow(0.5, ageDays / halfLife)
+    }
+  }
   return { relevance, quality, utility }
 }
 
@@ -374,13 +385,22 @@ export function compose(rawCandidates, opts = {}) {
     noEcho.push(...ranked)
   }
 
+  // —— C3 滞回（2026-09-12，用户拍板）：上一步已在注入集的候选获得粘性加成 ——
+  // 抑制相邻 step 注入集抖动（B8 turnover 观测的配套抑制手段）。相对加成 ×(1+h)，
+  // 不改变 utility 量纲；h=0 关闭。h=0.2 → 挤掉一个在位条目需要多 20% 的 utility。
+  const hysteresis = Number(opts.hysteresis ?? 0)
+  const prevIdSet = hysteresis > 0 && Array.isArray(opts.previousIds) ? new Set(opts.previousIds) : null
+  const sticky = prevIdSet
+    ? noEcho.map((c) => (prevIdSet.has(c.id) ? { ...c, utility: c.utility * (1 + hysteresis), sticky: true } : c))
+    : noEcho
+
   // —— Dedup：先按 id（跨 Provider 重复），再按 contentHash（内容重复，T2）——
   // contentHash = cand.contentHash ?? hashHex(cand.content)；同 hash 仅保留 utility
   // 最高的一条（按 utility 降序后首次出现者保留），其余 dropped，reason='duplicate-content'。
   // packBySection 会再按 utility/token 排序，此处重排无副作用。
   const seen = new Set()
   const idDeduped = []
-  for (const c of noEcho) {
+  for (const c of sticky) {
     if (seen.has(c.id)) {
       telemetry.dropped.push({ id: c.id, reason: 'duplicate' })
       continue

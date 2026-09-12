@@ -111,6 +111,12 @@ export const Config = z.object({
   //   shadow = 只统计不生效（默认——先观察注入差异再切）
   //   on     = 生效过滤
   preferenceEphemeralFilter: z.string().default('shadow'),
+  // 2026-09-12（用户拍板）：observation 时间衰减——老经验按半衰期让位（仅 observation 轨，
+  // evidence 不衰减）；0 = 关闭。decay = 0.5^(ageDays / 此值)。
+  observationHalfLifeDays: z.number().default(30),
+  // 2026-09-12（用户拍板）：C3 注入滞回——上一步在注入集的候选获 ×(1+h) 粘性加成，
+  // 抑制相邻 step 抖动；0 = 关闭。0.2 表示挤掉在位条目需多 20% utility。
+  injectionHysteresis: z.number().default(0.2),
 })
 
 /**
@@ -690,6 +696,10 @@ export function apply(ctx, config = {}) {
         currentSessionId: sessionId,
         crossSessionPolicy: config.crossSessionPolicy ?? 'non-instructional',
         fusion: config.fusion ?? 'weighted',
+        // 2026-09-12：observation 半衰期衰减 + C3 滞回（上一步注入集，读旧值——本步算完才更新）
+        observationHalfLifeDays: config.observationHalfLifeDays ?? 30,
+        hysteresis: config.injectionHysteresis ?? 0.2,
+        previousIds: lastInjectedBySession.get(sessionId) ?? [],
       })
 
       // —— T6 style 审批门（2026-08-27 架构修正）——

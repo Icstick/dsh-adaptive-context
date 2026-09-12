@@ -21,6 +21,8 @@ test('plugin config validates defaults through Standard Schema', async () => {
       observationInjection: false, // 2026-09-02：observation 注入已接线但默认冻结
       observationAuthorities: ['user_explicit', 'user_correction'], // T2 2026-09-07：权威闸门白名单
       preferenceEphemeralFilter: 'shadow', // 阶段 2.3 2026-09-09：默认只统计不生效
+      observationHalfLifeDays: 30, // 2026-09-12：observation 时间衰减半衰期（0=关闭）
+      injectionHysteresis: 0.2, // 2026-09-12：C3 注入滞回（0=关闭）
     },
   })
 })
