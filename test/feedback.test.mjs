@@ -9,6 +9,7 @@ import {
   RULE_PREFIXES, g2KeyOf, isExplicitRuleRequest,
   collectRuleCandidates, draftRuleFromEvidence,
   maybeDraft, parseDraftJson, DRAFT_MAX_RUNS_PER_DAY,
+  lexicalOverlap, findCoveringRule, RULE_OVERLAP_THRESHOLD,
 } from '../src/feedback.mjs'
 
 function freshLedger(t) {
@@ -132,6 +133,44 @@ test('maybeDraft：日限节流（同天已达上限 → daily_cap 短路）', a
   const r = await maybeDraft(ledger, {})
   assert.equal(r.ran, false)
   assert.equal(r.reason, 'daily_cap')
+})
+
+// ===================== B11 规则失效提示（2026-09-12） =====================
+
+test('B11：lexicalOverlap 边界（相同=1 / 不相交=0 / 高重叠部分 / 空串=0）', () => {
+  assert.equal(lexicalOverlap('改代码前先跑全量测试', '改代码前先跑全量测试'), 1)
+  assert.equal(lexicalOverlap('改代码前先跑全量测试', '今天天气很不错'), 0)
+  const partial = lexicalOverlap('改代码前先跑全量测试', '改代码前先跑测试')
+  assert.ok(partial >= RULE_OVERLAP_THRESHOLD && partial < 1, '高重叠: ' + partial)
+  assert.equal(lexicalOverlap('', 'abc'), 0)
+  assert.equal(lexicalOverlap('短', '短'), 1, '单字退化为自身集合')
+})
+
+test('B11：findCoveringRule 只认 active 规则；短文本不判定', (t) => {
+  const ledger = freshLedger(t)
+  ledger.ruleStore.createRule({ domain: 'habit', title: '门禁', text: '改代码前先跑全量测试', state: 'active' })
+  ledger.ruleStore.createRule({ domain: 'habit', title: '草案', text: '改代码前先跑全量测试', state: 'draft' })
+  const hit = findCoveringRule(ledger, { id: 'ev_x', content: '更正：改代码前先跑全量测试' })
+  assert.ok(hit, '应命中 active 规则')
+  assert.equal(hit.rule.title, '门禁')
+  assert.ok(hit.overlap >= RULE_OVERLAP_THRESHOLD)
+  assert.equal(findCoveringRule(ledger, { id: 'ev_y', content: '完全不相干的内容哈哈哈' }), null)
+  assert.equal(findCoveringRule(ledger, { id: 'ev_z', content: '短' }), null, '短文本不判定（防假阳性）')
+})
+
+test('B11：maybeDraft 遇规则已覆盖的纠正 → 不重复草拟 + rule_ineffective_suspect 审计', async (t) => {
+  const ledger = freshLedger(t)
+  ledger.ruleStore.createRule({ domain: 'habit', title: '门禁', text: '改代码前先跑全量测试', state: 'active' })
+  seedEv(ledger, { content: '更正：改代码前先跑全量测试', authority: 'user_correction', sourceClass: 'user_correction' })
+  const r = await maybeDraft(ledger, {})
+  assert.equal(r.ran, true)
+  assert.equal(r.drafted, 0, '被覆盖 → 不草拟新规则')
+  assert.equal(r.covered, 1)
+  assert.equal(ledger.ruleStore.queryRules({ state: 'draft' }).total, 0, '规则表不堆同义条目')
+  assert.equal(
+    ledger.db.prepare("SELECT COUNT(*) n FROM audit WHERE op='rule_ineffective_suspect'").get().n, 1,
+    '落规则失效嫌疑审计（可查、不静默）',
+  )
 })
 
 test('parseDraftJson：剥 markdown fence / 前后杂文；非法 → null', () => {

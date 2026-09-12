@@ -37,6 +37,8 @@ export const AUDIT_OPS = Object.freeze([
   'memento_cleared_after_migration',
   // B15（2026-09-12）：规则 gates 变更（pin/unpin 常驻标记）
   'rule_gates_updated',
+  // B11（2026-09-12）：新纠正与 active 规则重叠 → 规则疑似未生效（不重复草拟）
+  'rule_ineffective_suspect',
 ])
 
 /** 审计行为者枚举 */

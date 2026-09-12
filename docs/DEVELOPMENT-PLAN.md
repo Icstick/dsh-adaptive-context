@@ -29,7 +29,7 @@
 | ACP-B10 | ✅ 2026-09-11 | T4 规则 live 复查：**发现 rules 段容量与规则库规模脱节**——每条成本 20 token（source 标签）+ CJK 1.0/字，60 token 只装 1 条 40 字规则（8 条库实际注入 1 条）；候选 `slice(0,3)` 按 created_at 取最新 3 条 | 本轮修复：① 生产 rules 配额 60→140（吃 hotTokens 余量，合计 1600）② 规则精编 8→7 条（22-32 字/条，supersede 链 + 审计）③ rules/ 视图陈旧根因=外部写入不刷新 → 新增 `/acp rule rebuild` | ✅ 完成 |
 | ACP-B14 | ✅ 2026-09-12 | 规则层容量治理（B10 复查剩余项）：① 候选时间序切片 ② 标签固定开销 20 token/条 ③ 长度无提示 | ✅ 完成：① 全量 active 进候选（去 `slice(0,3)`），utility = 词面相关度 + explicitRef(+0.2) + pinBoost（gates 含 'always'，+0.5）② 短标签 `[rule]` + SHORT_LABEL_TOKENS=4 记账（rules 段实装 1→3-4 条）③ `/acp rule list` 标字数与 `⚠超40字安全线`。测试 422/422、lint 0/0、depcruise 0 违规 | ✅ 完成 |
 | ACP-B15 | 待名单 | 规则常驻分层：**机制已全部就位**（store `updateRuleGates` + `/acp rule pin/unpin <n>` + audit `rule_gates_updated` + list 序号与 📌 标记 + 测试），生产尚未 pin 任何规则 | 用户定常驻名单（建议：安全类「不可逆操作前先备份」+ 工作方式类「规划先行」）→ `/acp rule list` 看序号 → `/acp rule pin <n>` | 待用户定名单 |
-| ACP-B11 | 计划 | 反馈通道 V1.1：新 user_correction 与 active 规则 lexical 重叠 ≥0.6 → 提示"规则 X 似乎没生效"（与 C5 共用种子） | t4 计划 M7 扩展；V1.0 稳定后排期 | 未排期 |
+| ACP-B11 | ✅ 2026-09-12 | 反馈通道 V1.1：新 user_correction 与 active 规则 lexical 重叠 ≥0.6 → 提示"规则 X 似乎没生效"（与 C5 共用种子） | ✅ 完成 v1：`lexicalOverlap`（CJK bigram、min 归一化）+ `findCoveringRule`（阈值 0.6 / 仅 active / <10 字不判定）；maybeDraft 命中即不重复草拟 + audit `rule_ineffective_suspect`（evidenceId/overlap/ruleTitle）+ info 日志；返回加 `covered`。v2 候选（未做）：把嫌疑上报注入面提示模型自查 | ✅ 完成 |
 | ACP-B12 | 保留 | types.d.ts 空壳（package.json 声明 types）：等 harness 收录 acp/* 事件词汇后启用 | 保持现状；harness 支持后做 declaration merging | 保留 |
 | ACP-B13 | P3 | acp-controllability-fix-plan-2026-09-07.md（工作区 docs）§三清单 checkbox 未勾选但执行记录已 ✅ | 勾选或加"见执行记录"注（工作区文档，随报告收尾做） | ✅ 2026-09-10（该文档 §三 已勾选 + 回填注；工作区非 git 仓库，无提交） |
 

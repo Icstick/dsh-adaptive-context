@@ -231,6 +231,7 @@ pnpm install
 - **注入**（2026-09-12 容量治理，B14）：**全量 active 规则进候选**，按 composer utility（词面相关度主导 + `explicitRef` 加成 + `gates:['always']` 的 `pinBoost` 常驻加成）竞争 `rules` 段容量；**短标签 `[rule]`** 渲染（每条固定开销按 4 token 记账，此前按 20 计 → 段内实装条数从 1 提升到 3-4 条）；段配额由 `sectionQuota.rules` 决定（默认 60，生产 140）
 - **可注入性**：单条成本 ≈ 4 token（短标签）+ 正文 1.0 token/CJK 字；**超过 40 字**（默认段配额下的安全线）的规则可能被整条丢弃——`/acp rule list` 会标 `⚠超40字安全线`，草拟期即可发现
 - **修订**：规则修订 = 新行 supersedes 旧行（lineage 回溯）；不满足闸门的纠正维持 evidence 层按需召回
+- **失效观测（B11，2026-09-12）**：新纠正与某条 active 规则 bigram 重叠 ≥0.6 → 判定"规则疑似未生效"——不再重复草拟（避免同义规则堆积），落 audit `rule_ineffective_suspect`（含 evidenceId / overlap / ruleTitle）并写日志；短文本（<10 字）不判定（防假阳性）。用途：规则太长注不进、被容量裁掉、或模型未遵守，都能从审计里看出来
 ## 数据位置与备份
 
 - 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），六张表：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计

@@ -138,6 +138,44 @@ export function draftRuleFromEvidence(ledger, ev, opts = {}) {
   })
 }
 
+/** B11（2026-09-12）：CJK bigram 重叠度（用较短一方归一化，0..1）。
+ *  语义：覆盖率导向——短规则被长纠正"整句命中"时接近 1。
+ *  用途：判定"用户又纠正了同一件事，而 active 规则已存在" → 规则疑似未生效。 */
+export function lexicalOverlap(a, b) {
+  const grams = (s) => {
+    const t = String(s ?? '').replace(/\s+/g, '')
+    const set = new Set()
+    if (t.length === 1) set.add(t)
+    for (let i = 0; i + 1 < t.length; i += 1) set.add(t.slice(i, i + 2))
+    return set
+  }
+  const A = grams(a)
+  const B = grams(b)
+  if (A.size === 0 || B.size === 0) return 0
+  let inter = 0
+  for (const x of A) if (B.has(x)) inter += 1
+  return inter / Math.min(A.size, B.size)
+}
+
+/** B11：规则覆盖阈值（重叠 ≥ 此值视为已被既有规则覆盖） */
+export const RULE_OVERLAP_THRESHOLD = 0.6
+
+/**
+ * B11：候选证据是否已被某条 active 规则覆盖。
+ * @returns {{rule: object, overlap: number}|null} 取重叠最高者；无覆盖返回 null
+ */
+export function findCoveringRule(ledger, ev, threshold = RULE_OVERLAP_THRESHOLD) {
+  // 短文本（<10 字）bigram 样本太少，min 归一化会把偶发重合放大成假阳性 → 不判定
+  if (String(ev?.content ?? '').replace(/\s+/g, '').length < 10) return null
+  let best = null
+  const rules = ledger.ruleStore.queryRules({ state: 'active', limit: 200 }).items
+  for (const r of rules) {
+    const overlap = lexicalOverlap(ev?.content, r.text)
+    if (overlap >= threshold && (best === null || overlap > best.overlap)) best = { rule: r, overlap }
+  }
+  return best
+}
+
 /** LLM 草拟 system prompt */
 export const DRAFT_SYSTEM = [
   'You are distilling explicit user corrections/requests into durable RULES for a cross-session rule ledger.',
@@ -177,7 +215,7 @@ export async function maybeDraft(ledger, opts = {}) {
   const day = ledger.getMeta?.('feedback_draft_day') ?? ''
   const count = Number(ledger.getMeta?.('feedback_draft_count') ?? 0)
   if (day === today && count >= DRAFT_MAX_RUNS_PER_DAY) {
-    return { ran: false, reason: 'daily_cap', candidates: 0, drafted: 0 }
+    return { ran: false, reason: 'daily_cap', candidates: 0, drafted: 0, covered: 0 }
   }
   const candidates = collectRuleCandidates(ledger, opts)
   const done = draftedEvidenceIds(ledger)
@@ -185,7 +223,7 @@ export async function maybeDraft(ledger, opts = {}) {
   if (fresh.length === 0) {
     ledger.setMeta?.('feedback_draft_day', today)
     ledger.setMeta?.('feedback_draft_count', String(count + 1))
-    return { ran: true, candidates: 0, drafted: 0 }
+    return { ran: true, candidates: 0, drafted: 0, covered: 0 }
   }
   const batch = fresh.slice(0, DRAFT_MAX_BATCH)
   let parsed = null
@@ -200,8 +238,31 @@ export async function maybeDraft(ledger, opts = {}) {
     }
   }
   let drafted = 0
+  let covered = 0
   batch.forEach((ev, i) => {
     try {
+      // B11（2026-09-12）：已被 active 规则覆盖 → 不重复草拟（避免规则表堆积同义条目），
+      // 改落 rule_ineffective_suspect 审计 + 日志——"用户又纠正了同一件事但规则没生效"是
+      // 行为层信号（可能是规则太长注不进、被容量裁掉，或模型没遵守）。
+      const hit = findCoveringRule(ledger, ev)
+      if (hit) {
+        covered += 1
+        try {
+          ledger.auditStore?.appendAudit?.({
+            op: 'rule_ineffective_suspect',
+            targetId: hit.rule.id,
+            scopeId: ev.scopeId ?? 'user-global',
+            actor: 'feedback',
+            reason: 'correction overlaps active rule (rule may be ineffective)',
+            payload: { evidenceId: ev.id, overlap: Number(hit.overlap.toFixed(3)), ruleTitle: hit.rule.title },
+          })
+        } catch (err) {
+          opts.logger?.warn?.('[acp] feedback audit failed: ' + (err instanceof Error ? err.message : String(err)))
+        }
+        opts.logger?.info?.('[acp] rule ineffective suspect: ' + hit.rule.id
+          + ' overlap=' + hit.overlap.toFixed(2) + ' evidence=' + ev.id)
+        return
+      }
       const res = draftRuleFromEvidence(ledger, ev, { llmJson: parsed?.[i] ?? null })
       if (res.inserted) {
         drafted += 1 // 规则落库即算草拟成功；审计失败独立告警，不吞计数
@@ -224,7 +285,7 @@ export async function maybeDraft(ledger, opts = {}) {
   })
   ledger.setMeta?.('feedback_draft_day', today)
   ledger.setMeta?.('feedback_draft_count', String(count + 1))
-  return { ran: true, candidates: fresh.length, drafted }
+  return { ran: true, candidates: fresh.length, drafted, covered }
 }
 
 export { ruleIdOf }
