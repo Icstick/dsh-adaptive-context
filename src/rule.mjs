@@ -195,5 +195,21 @@ export function createRuleStore({ db }) {
     return collected
   }
 
-  return { createRule, transitionRule, getRule, queryRules, getRuleLineage }
+  /**
+   * B15（2026-09-12）：更新规则 gates（策略元数据：'always' = 常驻注入）。
+   * gates 不参与状态机（state 不变），仅影响 composer 的 pinBoost 与视图渲染；
+   * 审计由调用方落账（rule_gates_updated）。pin/unpin 走这里。
+   * @param {string} id
+   * @param {string[]} gates
+   * @returns {object} 更新后的规则行
+   */
+  function updateRuleGates(id, gates) {
+    const key = String(id ?? '')
+    if (!getStmt.get(key)) fail('NOT_FOUND', 'rule not found: ' + id)
+    const next = Array.isArray(gates) ? gates.map((g) => String(g).trim()).filter(Boolean) : []
+    db.prepare('UPDATE rule SET gates = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(next), Date.now(), key)
+    return toRule(getStmt.get(key))
+  }
+
+  return { createRule, transitionRule, getRule, queryRules, getRuleLineage, updateRuleGates }
 }

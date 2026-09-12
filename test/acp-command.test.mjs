@@ -42,6 +42,39 @@ test('list 展示草案与生效规则', (t) => {
   assert.ok(res.text.includes('生效规则'))
 })
 
+test('B15：pin/unpin 切换常驻标记（gates always）+ audit + onChanged', (t) => {
+  const ledger = fresh(t)
+  const a = seedDraft(ledger, { title: '生效A', text: '规则A文本', gates: [] })
+  ledger.ruleStore.transitionRule(a.row.id, 'approve')
+  let changed = 0
+  const pin = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule pin 1', { onChanged: () => { changed += 1 } })
+  assert.equal(pin.kind, 'success')
+  assert.ok(pin.text.includes('always'), pin.text)
+  assert.deepEqual(ledger.ruleStore.getRule(a.row.id).gates, ['always'])
+  assert.equal(changed, 1)
+  assert.equal(
+    ledger.db.prepare("SELECT COUNT(*) n FROM audit WHERE op='rule_gates_updated' AND target_id=?").get(a.row.id).n, 1,
+  )
+  const unpin = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule unpin 1', { onChanged: () => { changed += 1 } })
+  assert.equal(unpin.kind, 'success')
+  assert.deepEqual(ledger.ruleStore.getRule(a.row.id).gates, [])
+  assert.equal(changed, 2)
+  const again = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule unpin 1')
+  assert.equal(again.kind, 'success', '重复 unpin 幂等（gates 已空）')
+})
+
+test('B15：pin 越界/非法序号 → error；list 显示序号与常驻标记', (t) => {
+  const ledger = fresh(t)
+  assert.equal(handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule pin 9').kind, 'error')
+  assert.equal(handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule pin x').kind, 'error')
+  const a = seedDraft(ledger, { title: '常驻规则', text: '不可逆操作前先备份', gates: [] })
+  ledger.ruleStore.transitionRule(a.row.id, 'approve')
+  ledger.ruleStore.updateRuleGates(a.row.id, ['always'])
+  const res = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule list')
+  assert.ok(res.text.includes('1. ['), 'active 带序号: ' + res.text)
+  assert.ok(res.text.includes('📌常驻'), '常驻标记显示')
+})
+
 test('B14-4：list 展示字数与超安全线警示（可注入性提示）', (t) => {
   const ledger = fresh(t)
   seedDraft(ledger, { title: '短规则', text: '不可逆操作前先备份', gates: [] })

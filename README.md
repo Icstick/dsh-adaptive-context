@@ -227,7 +227,7 @@ pnpm install
 ## 反馈通道：纠正 → 规则（T4，0.3.0）
 
 - **草拟**：user_correction/user_explicit 证据过闸门（G1 显式前缀 `记住：/更正：/规则：`；G2 同义纠正前 24 字符重复 ≥2）→ LLM 草拟（复用 consolidation 路由，可缺失→G1 去前缀兜底）→ `rule` 表 draft 行 + audit `rule_drafted`；幂等（已入 rules 的证据不重复草拟），日限 4 run
-- **审批**：`/acp rule list | accept <n> | reject <n> | rebuild`（人工/headless 通道，never 策略可用；accept → active + `rulesDir` 视图重建 + audit；`rebuild` = 规则经脚本/外部写入后手动刷新视图）；style 候选审批在 never 策略下不自动发起（防静默 dismiss，isNeverApprovalPolicy）
+- **审批与治理**：`/acp rule list | accept <n> | reject <n> | rebuild | pin <n> | unpin <n>`（人工/headless 通道，never 策略可用；accept → active + `rulesDir` 视图重建 + audit；`rebuild` = 规则经脚本/外部写入后手动刷新视图；`pin/unpin` = 常驻标记（`gates: always` → 注入 `pinBoost` 加成，见下））；style 候选审批在 never 策略下不自动发起（防静默 dismiss，isNeverApprovalPolicy）
 - **注入**（2026-09-12 容量治理，B14）：**全量 active 规则进候选**，按 composer utility（词面相关度主导 + `explicitRef` 加成 + `gates:['always']` 的 `pinBoost` 常驻加成）竞争 `rules` 段容量；**短标签 `[rule]`** 渲染（每条固定开销按 4 token 记账，此前按 20 计 → 段内实装条数从 1 提升到 3-4 条）；段配额由 `sectionQuota.rules` 决定（默认 60，生产 140）
 - **可注入性**：单条成本 ≈ 4 token（短标签）+ 正文 1.0 token/CJK 字；**超过 40 字**（默认段配额下的安全线）的规则可能被整条丢弃——`/acp rule list` 会标 `⚠超40字安全线`，草拟期即可发现
 - **修订**：规则修订 = 新行 supersedes 旧行（lineage 回溯）；不满足闸门的纠正维持 evidence 层按需召回

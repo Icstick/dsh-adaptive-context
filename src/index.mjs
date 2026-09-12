@@ -771,7 +771,9 @@ export const RULE_CMD_USAGE = [
   '  accept <n>        审批通过第 n 条草案（→ active，视图重建 + 审计）',
   '  reject <n>        拒绝第 n 条草案（→ rejected + 审计）',
   '  rebuild           重建 rules/ 视图文件（规则经脚本/外部写入后刷新）',
-  '示例：/acp rule list → /acp rule accept 1 → /acp rule rebuild',
+  '  pin <n>           把第 n 条生效规则标为常驻（gates: always → 注入常驻加成）',
+  '  unpin <n>         取消第 n 条生效规则的常驻标记',
+  '示例：/acp rule list → /acp rule accept 1 → /acp rule pin 1 → /acp rule rebuild',
 ].join('\n')
 
 /** B14-4（2026-09-12）：规则可注入性安全线（CJK 字）。
@@ -789,7 +791,7 @@ function ruleSizeTag(r) {
 /** 渲染规则列表（draft 序号可操作；active 附后参考） */
 export function renderRuleList(ruleStore, _opts = {}) { // opts 预留（调用方当前只传 ruleStore）
   const draft = ruleStore.queryRules({ state: 'draft', limit: 50 }).items
-  const active = ruleStore.queryRules({ state: 'active', limit: 10 }).items
+  const active = ruleStore.queryRules({ state: 'active', limit: 50 }).items
   const lines = []
   if (draft.length === 0 && active.length === 0) {
     return '（无规则草案/生效规则——纠正会经草拟管线成为草案，见 /acp rule list）'
@@ -803,8 +805,10 @@ export function renderRuleList(ruleStore, _opts = {}) { // opts 预留（调用�
   }
   if (active.length > 0) {
     lines.push('[active] ' + active.length + ' 条生效')
-    active.forEach((r) => {
-      lines.push('  · [' + r.domain + '] ' + (r.title || String(r.text).slice(0, 24)) + '（since '
+    active.forEach((r, i) => {
+      const pinned = Array.isArray(r.gates) && r.gates.includes('always') ? ' 📌常驻' : ''
+      // B15：active 带序号（pin/unpin 按此序号操作）
+      lines.push('  ' + (i + 1) + '. [' + r.domain + '] ' + (r.title || String(r.text).slice(0, 24)) + pinned + '（since '
         + new Date(r.activeFrom ?? r.createdAt).toISOString().slice(0, 10) + ' · ' + ruleSizeTag(r) + '）')
     })
   }
@@ -845,6 +849,33 @@ export function handleRuleReviewCommand(ruleStore, auditStore, rawInput, opts = 
     }
     opts.onChanged?.()
     return { kind: 'success', text: 'rule ' + sub + ' → ' + row.state + '：' + (row.title || String(row.text).slice(0, 30)) }
+  }
+  if (sub === 'pin' || sub === 'unpin') {
+    // B15（2026-09-12）：常驻标记（gates 'always'）→ composer pinBoost 加成，
+    // 使核心铁律在词面不相关时仍优先占用 rules 段容量。序号对齐 /acp rule list 的 active 列表。
+    const idx = Number.parseInt(arg, 10)
+    if (!Number.isInteger(idx) || idx < 1) {
+      return { kind: 'error', text: '/acp rule ' + sub + ' <n>：需要生效规则列表序号（见 /acp rule list）' }
+    }
+    const act = ruleStore.queryRules({ state: 'active', limit: 50 }).items
+    const target = act[idx - 1]
+    if (!target) return { kind: 'error', text: '生效规则 #' + idx + ' 不存在（当前 ' + act.length + ' 条）' }
+    const gates = Array.isArray(target.gates) ? [...target.gates] : []
+    const has = gates.includes('always')
+    const next = sub === 'pin'
+      ? (has ? gates : [...gates, 'always'])
+      : gates.filter((g) => g !== 'always')
+    const row = ruleStore.updateRuleGates(target.id, next)
+    try {
+      auditStore?.appendAudit?.({
+        op: 'rule_gates_updated', targetId: target.id, scopeId: row.scopeId, actor,
+        reason: '/acp rule ' + sub, payload: { gates: row.gates, title: row.title },
+      })
+    } catch (err) {
+      opts.logger?.warn?.('[acp] rule gates audit failed: ' + (err instanceof Error ? err.message : String(err)))
+    }
+    opts.onChanged?.()
+    return { kind: 'success', text: 'rule ' + sub + ' → ' + (row.title || row.id) + '（gates: ' + (row.gates.join(',') || '-') + '）' }
   }
   if (sub === 'rebuild') {
     // D（2026-09-11 B10 复查）：规则经脚本/外部写入（非 /acp rule accept 路径）后 rules/ 视图不刷新。
