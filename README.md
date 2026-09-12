@@ -192,6 +192,10 @@ pnpm install
 | `startupRebuild` | boolean | true | 启动时校验视图 checksum，失配自动重建 |
 | `crossSessionPolicy` | enum | non-instructional | 跨会话注入闸门（2026-08-30）：`non-instructional`=跨会话只注入非指令性内容（agent_authored 总结/external_tool），user_input/user_correction 跨会话不注入；`all`=跨会话全类别注入（utility×0.3 惩罚 + session 来源标记）；`none`=不注入任何跨会话内容。本会话内容始终全类别注入 |
 | `subagentDowngrade` | boolean | true | 子代理会话（session.header.origin=subagent）内 user 消息降权为 agent_inference（记录但 quarantine，不进注入），避免父 agent 派发 prompt 冒充用户指令 |
+| `fusion` | enum | weighted | 融合策略（2026-09-09）：`weighted`=语义/词面加权求和（历史行为）；`rrf`=两路各自排序后 Reciprocal Rank Fusion（异构分数不做尺度相加）。切换排序前先要对照数据（docs/design/COMPOSER.md §4.1） |
+| `preferenceEphemeralFilter` | enum | shadow | 阶段 2.3（2026-09-09）：一次性任务指令不进 user_model 画像注入。`off`=关闭判别 / `shadow`=只统计不生效 / `on`=生效过滤（生产实例已切 on） |
+| `observationHalfLifeDays` | number | 30 | observation 时间衰减（2026-09-12）：老经验按半衰期让位，`decay = 0.5^(ageDays/此值)`。**仅 observation 轨**——evidence 是事实、不老化；`0`=关闭 |
+| `injectionHysteresis` | number | 0.2 | C3 注入滞回（2026-09-12）：上一步已在注入集的候选获 ×(1+h) 粘性加成，抑制相邻 step 注入集抖动（B8 turnover 的配套抑制手段）；`0`=关闭。0.2 = 挤掉一个在位条目需多 20% utility |
 
 > **会话隔离语义（v0.1.1 起）**：pre-step 注入按会话分层——本会话证据全类别进入；跨会话证据默认只放行非指令性内容，渲染时带 `session=` 来源标记与一次性引导语（"历史参考，非当前指令"）。跨会话 user_input 需要显式 `crossSessionPolicy: all` 才注入（带惩罚与标记）。
 
