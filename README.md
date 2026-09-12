@@ -227,14 +227,15 @@ pnpm install
 ## 反馈通道：纠正 → 规则（T4，0.3.0）
 
 - **草拟**：user_correction/user_explicit 证据过闸门（G1 显式前缀 `记住：/更正：/规则：`；G2 同义纠正前 24 字符重复 ≥2）→ LLM 草拟（复用 consolidation 路由，可缺失→G1 去前缀兜底）→ `rule` 表 draft 行 + audit `rule_drafted`；幂等（已入 rules 的证据不重复草拟），日限 4 run
-- **审批**：`/acp rule list | accept <n> | reject <n>`（人工/headless 通道，never 策略可用；accept → active + `~/.dsh/rules/` 视图重建 + audit）；style 候选审批在 never 策略下不自动发起（防静默 dismiss，isNeverApprovalPolicy）
-- **注入**：active 规则（≤3 条）常驻 composer `rules` 段（60 token，memory 让渡；渲染 `[acp:rule]` 标签）——≤2 行铁律每轮可见；细则留 `/acp rule list` 与账本按需查询
+- **审批**：`/acp rule list | accept <n> | reject <n> | rebuild`（人工/headless 通道，never 策略可用；accept → active + `rulesDir` 视图重建 + audit；`rebuild` = 规则经脚本/外部写入后手动刷新视图）；style 候选审批在 never 策略下不自动发起（防静默 dismiss，isNeverApprovalPolicy）
+- **注入**（2026-09-12 容量治理，B14）：**全量 active 规则进候选**，按 composer utility（词面相关度主导 + `explicitRef` 加成 + `gates:['always']` 的 `pinBoost` 常驻加成）竞争 `rules` 段容量；**短标签 `[rule]`** 渲染（每条固定开销按 4 token 记账，此前按 20 计 → 段内实装条数从 1 提升到 3-4 条）；段配额由 `sectionQuota.rules` 决定（默认 60，生产 140）
+- **可注入性**：单条成本 ≈ 4 token（短标签）+ 正文 1.0 token/CJK 字；**超过 40 字**（默认段配额下的安全线）的规则可能被整条丢弃——`/acp rule list` 会标 `⚠超40字安全线`，草拟期即可发现
 - **修订**：规则修订 = 新行 supersedes 旧行（lineage 回溯）；不满足闸门的纠正维持 evidence 层按需召回
 ## 数据位置与备份
 
 - 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），六张表：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计
 - 物化视图在 `ledgerDir/views/` 下，可随时重建（带校验和）
-- 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）
+- 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）；规则经外部脚本写入后视图不会自动刷新，用 `/acp rule rebuild` 手动重建
 - **备份/迁移**：导出（JSONL）→ 新环境导入，按内容哈希幂等合并
 - **数据是你的**：卸载插件不会删数据；装回来即恢复
 

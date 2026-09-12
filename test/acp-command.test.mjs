@@ -42,6 +42,17 @@ test('list 展示草案与生效规则', (t) => {
   assert.ok(res.text.includes('生效规则'))
 })
 
+test('B14-4：list 展示字数与超安全线警示（可注入性提示）', (t) => {
+  const ledger = fresh(t)
+  seedDraft(ledger, { title: '短规则', text: '不可逆操作前先备份', gates: [] })
+  const long = '很长的规则文本'.repeat(10) // 70 字 > 40 字安全线
+  seedDraft(ledger, { title: '长规则', text: long, gates: [] })
+  const res = handleRuleReviewCommand(ledger.ruleStore, ledger.auditStore, 'rule list')
+  assert.ok(res.text.includes(String('不可逆操作前先备份'.length) + '字'), '短规则显示字数标记: ' + res.text)
+  assert.ok(res.text.includes('70字'), '长规则显示字数标记')
+  assert.ok(res.text.includes('⚠超40字安全线'), '长规则带超线警示')
+})
+
 test('accept 1 → active + audit rule_approved + onChanged 回调', (t) => {
   const ledger = fresh(t)
   const d = seedDraft(ledger)

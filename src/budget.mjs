@@ -40,6 +40,11 @@ export const MVP_SECTION_TOTAL = Object.freeze(
  *  旧实现完全不记账 → 预算账实不符（P0-3，2026-09-02）。 */
 export const LINE_LABEL_TOKENS = 20
 
+/** B14-1（2026-09-12 规则层容量治理）：短标签渲染行的固定开销。
+ *  规则行（`[rule] 文本`）不带 id/domain/session 元数据，实测标签 ≈ 7 字符；
+ *  旧口径按 LINE_LABEL_TOKENS=20 记账 → 每条规则虚耗 16 token，rules 段实际只能装 1 条。 */
+export const SHORT_LABEL_TOKENS = 4
+
 /** CJK 码点判定（统一表意文字 + 扩展区 + 全角/CJK 标点） */
 function isCjkCodePoint(cp) {
   return (cp >= 0x3000 && cp <= 0x303f)
@@ -90,6 +95,7 @@ export class ComposeTelemetry {
   constructor() {
     this.retrieved = 0
     this.admitted = 0
+    this.admittedIds = []  // B8（2026-09-12）：本步实际注入的候选 id（turnover 观测用）
     this.dropped = []      // [{ id, reason }]
     this.sectionTokens = {} // { section: tokens }
     this.totalTokens = 0
@@ -98,6 +104,7 @@ export class ComposeTelemetry {
     return {
       retrieved: this.retrieved,
       admitted: this.admitted,
+      admittedIds: this.admittedIds,
       dropped: this.dropped,
       sectionTokens: this.sectionTokens,
       totalTokens: this.totalTokens,

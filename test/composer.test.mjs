@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  compose, lexicalScore, utilityOf, renderSourceLabelled, sectionOf, shortSessionId,
+  compose, lexicalScore, utilityOf, renderSourceLabelled, sectionOf, shortSessionId, jaccard,
 } from '../src/composer.mjs'
 import { packBySection, estimateTokens, MVP_TOTAL_BUDGET } from '../src/budget.mjs'
 
@@ -362,6 +362,56 @@ test('renderSourceLabelled：rule 候选渲染 [acp:rule] 标签（无 claimDoma
     content: '每次提交前跑全量测试', state: 'active',
   }])
   assert.ok(s.includes('[acp:rule | id=rule_x | domain=]'), s)
+})
+
+// ===================== B14 规则层容量治理（2026-09-12） =====================
+
+test('B14-1：shortLabel 候选渲染 [rule] 短标签（不渲染 id/domain 元数据）', () => {
+  const s = renderSourceLabelled([{
+    id: 'rule_x', sourceClass: 'rule', shortLabel: true,
+    content: '不可逆操作前先备份并说明影响',
+  }])
+  assert.equal(s, '[rule] 不可逆操作前先备份并说明影响')
+})
+
+test('B14-1：shortLabel 按 SHORT_LABEL_TOKENS 记账 → 同配额下 rules 段可装更多条', () => {
+  const mk = (i, short) => ({
+    id: 'r' + i, scopeId: 'user-global', sourceClass: 'rule', section: 'rules', state: 'active',
+    content: '规则文本' + i, shortLabel: short,
+  })
+  const long = compose([mk(1, false), mk(2, false), mk(3, false)], { query: 'x', scopeId: 'user-global' })
+  const short = compose([mk(1, true), mk(2, true), mk(3, true)], { query: 'x', scopeId: 'user-global' })
+  const longN = long.items.filter((c) => c.section === 'rules').length
+  const shortN = short.items.filter((c) => c.section === 'rules').length
+  assert.ok(shortN >= longN, `短标签不应减少可容纳条数（long=${longN} short=${shortN}）`)
+  assert.ok(
+    short.telemetry.sectionTokens.rules < long.telemetry.sectionTokens.rules,
+    '短标签的 rules 段 token 占用更低（每条省 16 token 记账）',
+  )
+})
+
+test('B14-3：pinBoost 提升 utility（常驻铁律加成，与 query 相关性无关）', () => {
+  const pinned = utilityOf({ content: '无关内容甲乙丙', pinBoost: 0.5 }, { query: 'zzz' })
+  const plain = utilityOf({ content: '无关内容甲乙丙' }, { query: 'zzz' })
+  assert.ok(pinned.utility > plain.utility, 'pinBoost 必须提高 utility')
+  assert.equal(Math.round((pinned.utility - plain.utility) * 100) / 100, 0.5)
+})
+
+test('B8：jaccard 边界（双方空=1；完全相同=1；不相交=0；部分重叠）', () => {
+  assert.equal(jaccard([], []), 1)
+  assert.equal(jaccard(['a', 'b'], ['b', 'a']), 1)
+  assert.equal(jaccard(['a', 'b'], ['b', 'c']), 1 / 3)
+  assert.equal(jaccard(['a'], ['b']), 0)
+  assert.equal(jaccard(null, undefined), 1)
+})
+
+test('B8：compose 返回 admittedIds，与 items 一致且进入 telemetry', () => {
+  // query 与候选正文不可互为子串（self-echo 过滤 T1：content 包含 query 也算），
+  // 故用完全无关的查询词——本用例只验证 admittedIds 透出，不关心排序。
+  const r = compose([ev({ id: 'ev_1', content: '用户偏好 TypeScript' })], { query: '无关查询词', scopeId: 'user-global' })
+  assert.ok(r.items.length > 0)
+  assert.deepEqual(r.admittedIds, r.items.map((c) => c.id))
+  assert.deepEqual(r.telemetry.admittedIds, r.admittedIds)
 })
 
 

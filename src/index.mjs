@@ -20,7 +20,10 @@ import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
 import { isNeverApprovalPolicy } from './expression.mjs'
 import { maybeDraft } from './feedback.mjs'
 import { makeAcpQueryTool } from './tools.mjs'
-import { compose, renderSourceLabelled, CROSS_SESSION_POLICIES } from './composer.mjs'
+import { compose, renderSourceLabelled, jaccard, CROSS_SESSION_POLICIES } from './composer.mjs'
+
+/** B8（2026-09-12）：会话级上一步注入集（turnover 观测用；纯观测，不参与注入逻辑）。 */
+const lastInjectedBySession = new Map()
 import { createProviderRegistry } from './providers/registry.mjs'
 import { createLlmRouter } from './providers/llm-router.mjs'
 import { createConsolidator } from './consolidate.mjs'
@@ -651,15 +654,26 @@ export function apply(ctx, config = {}) {
       // 无 targetDomain 跳过资格矩阵放行；渲染以 [acp:rule] 标识来源。
       let ruleCandidates = []
       try {
-        const ruleRows = ledger.ruleStore.queryRules({ state: 'active', limit: 10 }).items
-        ruleCandidates = ruleRows.slice(0, 3).map((r) => ({
-          id: r.id,
-          content: String(r.text ?? '').slice(0, 150),
-          scopeId,
-          sourceClass: 'rule',
-          state: 'active',
-          section: 'rules',
-        }))
+        // B14-2/3（2026-09-12）：全量 active 进候选——去掉旧 slice(0,3) 时间序切片
+        // （它让老规则永不进候选，7 条库实际只有最新 3 条参与竞争）。排序交给 composer 的
+        // utility（词法相关度主导）+ pinBoost（gates 含 'always' 的核心铁律常驻加成），
+        // 容量由 rules 段配额裁定；shortLabel 让规则行按 4 token 记账（B14-1，省 16/条）。
+        const ruleRows = ledger.ruleStore.queryRules({ state: 'active', limit: 50 }).items
+        ruleCandidates = ruleRows.map((r) => {
+          const gates = Array.isArray(r.gates) ? r.gates : []
+          return {
+            id: r.id,
+            content: String(r.text ?? ''),
+            scopeId,
+            sourceClass: 'rule',
+            state: 'active',
+            section: 'rules',
+            shortLabel: true,
+            confidence: 0.95,      // 人工审批产物（默认 0.5 → quality 0.75 vs 0.975）
+            explicitRef: true,     // 用户显式行为约束（+0.2：词面不相关时不至全零被随机裁掉）
+            pinBoost: gates.includes('always') ? 0.5 : 0,
+          }
+        })
       } catch (err) {
         ctx.logger?.warn?.('[acp] rule candidates failed: ' + (err instanceof Error ? err.message : String(err)))
       }
@@ -703,6 +717,19 @@ export function apply(ctx, config = {}) {
       const body = renderSourceLabelled(result.items, { currentSessionId: sessionId })
       // S1 P7：注入实际发生（items 非空）→ 向调度器上报实际注入字符（fail-open）
       reportInjectionToScheduler(ctx, sessionId, body)
+      // B8（2026-09-12）：注入集稳定性观测（turnover）——相邻 step 的 Jaccard + 集大小，
+      // 仅写日志（fail-open，绝不阻塞注入）。1.0=两次注入集完全相同，低值=召回漂移大。
+      try {
+        const injectedIds = Array.isArray(result.admittedIds) ? result.admittedIds : []
+        const prevIds = lastInjectedBySession.get(sessionId) ?? []
+        ctx.logger?.info?.('[acp] injection turnover jaccard=' + jaccard(prevIds, injectedIds).toFixed(2)
+          + ' admitted=' + injectedIds.length + ' prev=' + prevIds.length)
+        lastInjectedBySession.set(sessionId, injectedIds)
+        if (lastInjectedBySession.size > 50) { // 防无界累积（只保留最近 50 个会话）
+          const oldest = lastInjectedBySession.keys().next().value
+          if (oldest !== undefined && oldest !== sessionId) lastInjectedBySession.delete(oldest)
+        }
+      } catch { /* 观测失败不影响注入 */ }
       const ours = createUserMessage({
         content: [{ type: 'text', text: body }],
         source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },
@@ -747,6 +774,18 @@ export const RULE_CMD_USAGE = [
   '示例：/acp rule list → /acp rule accept 1 → /acp rule rebuild',
 ].join('\n')
 
+/** B14-4（2026-09-12）：规则可注入性安全线（CJK 字）。
+ *  单条成本 ≈ 短标签 4 token + 正文 1.0/字；默认 rules 配额 60 → 单条上限 ≈ 40 字（0.6×60−4），
+ *  生产配额 140 → ≈ 80 字。超线会被 packBySection 整条丢弃（或按 section 上限截断），
+ *  故在 list/草拟阶段就标出，避免"写了规则但不生效"。 */
+const RULE_INJECT_CHARS_SAFE = 40
+
+/** 规则长度标记（含超安全线警示） */
+function ruleSizeTag(r) {
+  const chars = String(r.text ?? '').length
+  return chars + '字' + (chars > RULE_INJECT_CHARS_SAFE ? ' ⚠超' + RULE_INJECT_CHARS_SAFE + '字安全线（可能被整条丢弃）' : '')
+}
+
 /** 渲染规则列表（draft 序号可操作；active 附后参考） */
 export function renderRuleList(ruleStore, _opts = {}) { // opts 预留（调用方当前只传 ruleStore）
   const draft = ruleStore.queryRules({ state: 'draft', limit: 50 }).items
@@ -759,13 +798,14 @@ export function renderRuleList(ruleStore, _opts = {}) { // opts 预留（调用�
     lines.push('[draft] ' + draft.length + ' 条（accept/reject 按此序号）')
     draft.forEach((r, i) => {
       lines.push('  ' + (i + 1) + '. [' + r.domain + '] ' + (r.title || '（无标题）'))
-      lines.push('     gates=' + (r.gates.join(',') || '-') + ' | ' + String(r.text).slice(0, 80))
+      lines.push('     gates=' + (r.gates.join(',') || '-') + ' | ' + ruleSizeTag(r) + ' | ' + String(r.text).slice(0, 80))
     })
   }
   if (active.length > 0) {
     lines.push('[active] ' + active.length + ' 条生效')
     active.forEach((r) => {
-      lines.push('  · [' + r.domain + '] ' + (r.title || String(r.text).slice(0, 24)) + '（since ' + new Date(r.activeFrom ?? r.createdAt).toISOString().slice(0, 10) + '）')
+      lines.push('  · [' + r.domain + '] ' + (r.title || String(r.text).slice(0, 24)) + '（since '
+        + new Date(r.activeFrom ?? r.createdAt).toISOString().slice(0, 10) + ' · ' + ruleSizeTag(r) + '）')
     })
   }
   return lines.join('\n')

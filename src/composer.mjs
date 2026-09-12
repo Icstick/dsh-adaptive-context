@@ -22,7 +22,7 @@
 import { hashHex } from './constants.mjs'
 import { readGuard } from './governance.mjs'
 import {
-  packBySection, estimateTokens, truncateToTokens, LINE_LABEL_TOKENS,
+  packBySection, estimateTokens, truncateToTokens, LINE_LABEL_TOKENS, SHORT_LABEL_TOKENS,
   MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET, ComposeTelemetry,
 } from './budget.mjs'
 
@@ -209,6 +209,9 @@ export function utilityOf(cand, opts = {}) {
   let utility = relevance * quality
   if (cand.explicitRef) utility += 0.2   // explicit_ref_boost
   if (cand.explicitCorrection) utility += 0.3 // explicit_correction_boost（更高）
+  // B14-3（2026-09-12）：常驻加成——gates 含 'always' 的规则由调用方折算成 pinBoost，
+  // 使核心铁律在词面不相关时仍优先占用 rules 段容量（分层：常驻 vs 按需竞争）。
+  if (Number.isFinite(cand.pinBoost) && cand.pinBoost > 0) utility += cand.pinBoost
   // 跨会话惩罚（2026-08-30，ISSUES-INJECTION-ISOLATION.md F7）：其他会话的候选
   // 即使进入注入，也大幅降权（0.3 系数），保证本会话内容占主导。
   if (cand.crossSession) utility *= CROSS_SESSION_PENALTY
@@ -324,7 +327,10 @@ export function compose(rawCandidates, opts = {}) {
     // 决策 2（2026-09-02）：单条最多占本 section 配额的 60%，超出则**截断 + 标注可回溯 id**，
     // 而不是像旧实现那样整条丢弃（账本里 53.8% 的证据因此永远进不了注入面）。
     const sectionCap = Number.isFinite(quotaTable[section]) ? quotaTable[section] : 300
-    const maxBody = Math.max(40, Math.floor(sectionCap * 0.6) - LINE_LABEL_TOKENS)
+    // B14-1（2026-09-12）：短标签行（规则 `[rule]`）按 SHORT_LABEL_TOKENS=4 记账，
+    // 不再按 20 计——旧口径让每条规则虚耗 16 token，rules 段实际只能装 1 条。
+    const labelTokens = cand.shortLabel === true ? SHORT_LABEL_TOKENS : LINE_LABEL_TOKENS
+    const maxBody = Math.max(40, Math.floor(sectionCap * 0.6) - labelTokens)
     // 2026-09-09（同行调研 P0-4）：高权威条目不截断——按 token 切会切掉条件从句，
     // 「我不用 tabs，除了这个项目」截断成「我不用 tabs」就是语义反转。
     // 改为整条保留，超 section 配额时由 packBySection 整条丢弃（结构化拒绝），绝不半条。
@@ -342,7 +348,7 @@ export function compose(rawCandidates, opts = {}) {
     }
     // contentHash 固定按原文算：截断不应破坏跨候选的重复内容去重
     const contentHash = cand.contentHash ?? hashHex(raw)
-    const tokens = estimateTokens(content) + LINE_LABEL_TOKENS
+    const tokens = estimateTokens(content) + labelTokens
     return { ...cand, content, contentHash, truncated, oversize, utility, section, tokens }
   })
 
@@ -401,14 +407,33 @@ export function compose(rawCandidates, opts = {}) {
   const packed = packBySection(deduped, opts.quota ?? MVP_SECTION_QUOTA, opts.maxTokens ?? MVP_TOTAL_BUDGET)
   telemetry.dropped.push(...packed.dropped)
   telemetry.admitted = packed.items.length
+  telemetry.admittedIds = packed.items.map((c) => c.id) // B8：本步注入集（turnover 观测）
   telemetry.sectionTokens = packed.sectionTokens
   telemetry.totalTokens = packed.totalTokens
 
   return {
     items: packed.items,
+    admittedIds: telemetry.admittedIds,
     dropped: telemetry.dropped,
     telemetry: telemetry.snapshot,
   }
+}
+
+/**
+ * B8（2026-09-12）：两步注入集稳定性度量（Jaccard 相似度，0..1）。
+ * 相邻 step 注入集越稳定（重复注入同一批），召回漂移越小；双方皆空视为 1。
+ * 供 pre-step 观测上报使用（fail-open，不影响注入路径）。
+ * @param {string[]} a
+ * @param {string[]} b
+ * @returns {number}
+ */
+export function jaccard(a, b) {
+  const A = new Set(Array.isArray(a) ? a : [])
+  const B = new Set(Array.isArray(b) ? b : [])
+  if (A.size === 0 && B.size === 0) return 1
+  let inter = 0
+  for (const x of A) if (B.has(x)) inter += 1
+  return inter / (A.size + B.size - inter)
 }
 
 /** 候选 → section 归类（MVP 简化：按 claimDomain） */
@@ -446,8 +471,12 @@ export function renderSourceLabelled(items, opts = {}) {
       bannerShown = true
     }
     const sessionTag = isCross ? ' | session=' + shortSessionId(sid) : ''
-    lines.push(
-      `[acp:${cand.sourceClass ?? 'evidence'} | id=${cand.id} | domain=${cand.claimDomain ?? ''}${sessionTag}] ${cand.content}`)
+    // B14-1（2026-09-12）：短标签候选（规则）只渲染 `[rule]`——id/domain 元数据对模型无用，
+    // 完整溯源走 ledger（rule 表 + audit）。长标签行维持原格式（证据 id 有追溯价值）。
+    const label = cand.shortLabel === true
+      ? `[${cand.sourceClass ?? 'acp'}]`
+      : `[acp:${cand.sourceClass ?? 'evidence'} | id=${cand.id} | domain=${cand.claimDomain ?? ''}${sessionTag}]`
+    lines.push(label + ' ' + cand.content)
   }
   return lines.join('\n')
 }
