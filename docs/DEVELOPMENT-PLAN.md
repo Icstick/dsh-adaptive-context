@@ -14,6 +14,7 @@
 | 0.4.0 | fd91ed2 | 注入/蒸馏质量治理：蒸馏非放大（observation 权威取支撑证据最弱值）、RRF 秩融合（fusion=rrf，默认仍 weighted）、高权威条目不截断、一次性任务指令不进画像（阶段 2.3，默认 shadow 已切 on）；安全审计修复 H-4/H-5；backlog 收口 B1/B4/B5/B9/B13；同行调研 PEER-SURVEY-20260909 |
 
 | 0.5.0 | f9a6055 | 规则层治理：B10 容量校准（生产 rules 60→140、规则精编 8→7 条）+ B14 短标签记账（20→4 token/条）、全量候选去时间序切片、pinBoost 常驻分层、可注入性提示（⚠超40字）+ B15 `/acp rule pin\|unpin` 常驻机制 + B11 规则失效观测（bigram≥0.6 判定已覆盖）+ B8 注入集 turnover（admittedIds+jaccard）；附带 consolidate 审计区间留痕/空批次水位线修复、llm-router source.form 修复 |
+| 0.6.0 | 9303d8f | 注入陈旧度与抖动治理（unresolved ②③ 拍板）：observation 时间衰减 `observationHalfLifeDays`（默认 30 天，`decay=0.5^(ageDays/halfLife)`，**仅 observation 轨**——evidence 不老化）+ C3 注入滞回 `injectionHysteresis`（默认 0.2，上一步注入集候选 ×(1+h) 粘性，抑制相邻 step 抖动）；README 配置表补齐 fusion / preferenceEphemeralFilter 两处历史遗漏；backlog B15 回写（常驻名单已 pin）+ B16 收口 |
 
 ## 待办（Backlog）
 
