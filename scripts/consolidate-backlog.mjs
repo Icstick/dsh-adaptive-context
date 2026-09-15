@@ -25,6 +25,7 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
+import { resolveDshHome } from '../src/home.mjs'
 import { pathToFileURL } from 'node:url'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { createConsolidator } from '../src/consolidate.mjs'
@@ -85,7 +86,7 @@ function parseArgs(argv) {
     a[key] = next && !next.startsWith('--') ? next : '1'
   }
   return {
-    dir: a.dir || path.join(process.env.DSH_HOME || '', 'acp'),
+    dir: a.dir || path.join(resolveDshHome(), 'acp'),
     batch: Number(a.batch || 0) || CONSOLIDATION_MAX_BATCH,
     model: a.model || 'deepseek-v4-flash',
     maxTokens: Number(a.maxTokens || 12288),
@@ -113,7 +114,7 @@ export function loadApiKey(envName, { fromCredentials = false } = {}) {
   if (!/^[A-Za-z0-9_]+$/.test(envName)) throw new Error('env name 需为字母数字下划线: ' + envName)
   if (process.env[envName]) return { key: process.env[envName], source: 'env' }
   if (!fromCredentials) return null
-  const cred = path.join(process.env.DSH_HOME || '', '.credentials.yaml')
+  const cred = path.join(resolveDshHome(), '.credentials.yaml')
   if (!existsSync(cred)) return null
   const text = readFileSync(cred, 'utf8')
   // 迷你 YAML：refs 段下的 KEY: value 行（容忍引号）
