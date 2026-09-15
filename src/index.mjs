@@ -12,7 +12,7 @@
 //   turn/end       → session/event 内 event.type==='turn/end' 时入队 background consolidation
 
 import path from 'node:path'
-import { homedir as osHomedir } from 'node:os'
+import { resolveDshHome } from './home.mjs'
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
@@ -352,15 +352,14 @@ export function mergeSettingsIntoConfig(ctx, config) {
 export function apply(ctx, config = {}) {
   // 设置页（settings.yaml）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
   config = mergeSettingsIntoConfig(ctx, config)
-  // ledgerDir 兜底解析（与 openEvidenceLedger 同款：DSH_HOME 环境变量不可靠，配置优先）
-  const ledgerDir = config.ledgerDir ?? path.join(process.env.DSH_HOME || '', 'acp')
+  // ledgerDir 兜底解析（与 openEvidenceLedger 同款；回落链见 src/home.mjs）
+  const ledgerDir = config.ledgerDir ?? path.join(resolveDshHome(), 'acp')
   const ledger = openEvidenceLedger({ dir: ledgerDir })
   const acp = createAcpService({ ledger, startupRebuild: config.startupRebuild ?? true })
 
   // --- T4 M4.1b：rules/ 视图重建闭包（views are rebuildable）---
   // 启动全量重建 + /acp rule accept 后刷新共用；失败只 warn 不阻断插件。
-  const rulesDir = config.rulesDir
-    ?? path.join(process.env.DSH_HOME || path.join(osHomedir(), '.dsh'), 'rules')
+  const rulesDir = config.rulesDir ?? path.join(resolveDshHome(), 'rules')
   function refreshRulesView() {
     try {
       const activeRules = ledger.ruleStore.queryRules({ state: 'active', limit: 500 }).items

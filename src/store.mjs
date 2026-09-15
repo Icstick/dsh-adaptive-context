@@ -15,6 +15,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
+import { resolveDshHome } from './home.mjs'
 import {
   SCHEMA_VERSION, EVIDENCE_STATES, OBSERVATION_STATES, AUTHORITIES, SOURCE_CLASSES,
   CLAIM_DOMAINS, SENSITIVITIES, SCOPES, SESSION_TYPES,
@@ -179,7 +180,8 @@ function assertChoice(value, allowed, label) {
  * @returns {object} LedgerProvider 句柄
  */
 export function openEvidenceLedger(opts = {}) {
-  const dir = opts.dir ?? path.join(process.env.DSH_HOME || '', 'acp')
+  // 回落链：显式 dir > $DSH_HOME/acp > ~/.dsh/acp（见 src/home.mjs）
+  const dir = opts.dir ?? path.join(resolveDshHome(), 'acp')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const dbPath = path.join(dir, opts.dbName ?? 'acp-ledger.db')
   const db = new DatabaseSync(dbPath)
