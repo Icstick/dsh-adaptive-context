@@ -41,9 +41,6 @@
 
 ## 已收口（近期）
 
----
-> 2026-09-21 追加：见上方 ACP-B17/B18
-
 - T1（C9 清污染 + isCorrection 收紧）✅ 2026-09-07 —— 存量 quarantine_noise ×3、收紧已在代码
 - T2（observation 权威闸门）✅ 0759eb8 —— observationAuthorities 默认白名单
 - T2.5（蒸馏语义虚高治理）✅ ca2ad57
