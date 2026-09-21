@@ -307,3 +307,30 @@ test('E2+：agent/inbox/spliced + kind 缺失 → 不摄入（来源不可判定
   }
   assert.equal(isEvidenceWorthy(ev), false)
 })
+
+// —— P1-4.2（2026-09-21）：4000 截断必须是可见的 ——
+
+test('P1-4.2：超长文本截断后带可见标记', () => {
+  const t = extractText({ content: 'x'.repeat(4500) })
+  assert.ok(t.endsWith('…[truncated 4500 chars]'), t.slice(-40))
+  assert.equal(t.slice(0, 4000), 'x'.repeat(4000), '前 4000 字符原样保留')
+})
+
+test('P1-4.2：未超限文本不加标记', () => {
+  const t = extractText({ content: 'short text' })
+  assert.equal(t, 'short text')
+  assert.ok(!t.includes('truncated'))
+})
+
+test('P1-4.2：边界——恰好 4000 不加，4001 加', () => {
+  assert.equal(extractText({ content: 'z'.repeat(4000) }), 'z'.repeat(4000))
+  const t = extractText({ content: 'z'.repeat(4001) })
+  assert.ok(t.endsWith('…[truncated 4001 chars]'), t.slice(-40))
+})
+
+test('P1-4.2：截断确定性——同一事件恒得同一结果（幂等契约）', () => {
+  const ev = { content: 'y'.repeat(4200) }
+  assert.equal(extractText(ev), extractText(ev))
+  // 且截断结果仍低于 evidence 写入校验上限 8000
+  assert.ok(extractText(ev).length < 8000)
+})

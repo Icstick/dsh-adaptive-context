@@ -36,8 +36,13 @@
 | ACP-B12 | 保留 | types.d.ts 空壳（package.json 声明 types）：等 harness 收录 acp/* 事件词汇后启用 | 保持现状；harness 支持后做 declaration merging | 保留 |
 | ACP-B13 | P3 | acp-controllability-fix-plan-2026-09-07.md（工作区 docs）§三清单 checkbox 未勾选但执行记录已 ✅ | 勾选或加"见执行记录"注（工作区文档，随报告收尾做） | ✅ 2026-09-10（该文档 §三 已勾选 + 回填注；工作区非 git 仓库，无提交） |
 | ACP-B16 | ✅ 2026-09-12 | 注入陈旧度与抖动治理（unresolved ②③，用户拍板：① observation 时间衰减参数 ② C3 迟滞带） | ① `observationHalfLifeDays`（默认 30 天，decay=0.5^(ageDays/halfLife)，**仅 observation 轨**——evidence 是事实不老化）② `injectionHysteresis`（默认 0.2，上一步注入集候选 ×(1+h) 粘性加成，抑制相邻 step 抖动）；两者 0=关闭 | ✅ 完成 `b7942eb`（测试 429/429、lint 0/0、depcruise 0 违规）；生产 profile 已显式写出两键，待重启生效 |
+| ACP-B17 | P1 | `MAX_EVENT_TEXT_CHARS=4000` 的 4 处截断是**静默**的——账本里 100 行 content 长度**恰好 4000**，无任何标记，下游无法区分「原文就这么长」与「被砍了」（2026-09-21 复核 P1-4.2） | `extract.mjs` 新增 `clampText()`，超限追加 `…[truncated N chars]`（措辞与 `consolidate.mjs:164` 既有一致），4 处 slice 全改走它；标记进正文故 contentHash 随之变化 | ✅ 完成 `a3efb0a`（测试 449/449、lint 0/0、depcruise 0 违规） |
+| ACP-B18 | P1（**待设计**） | 「candidate 催办入口」——把待办 candidate 同步进 WorkState 的 `next_steps`。**评估后缓做**：① `work` 服务只有 `get`/`save`，`save` 是整份 upsert → ACP 必须 read-modify-write，与 `/checkpoint`、todo/write 自动捕获、LLM `work_state` 工具**三方并发写**，正是 WC 侧未收口的 D4（乐观锁无事务）；② WC 铁律 1 是 **WorkState 单写者**，跨插件写入违反其前提。**建议方向**：ACP 只暴露只读候选（服务或视图），由 WC 自己拉取并写入——单写者不变，边界先定 | ⏸ 阻塞于 P1-4.1「同步边界（B5）」定协议；先登记不动手（2026-09-21） |
 
 ## 已收口（近期）
+
+---
+> 2026-09-21 追加：见上方 ACP-B17/B18
 
 - T1（C9 清污染 + isCorrection 收紧）✅ 2026-09-07 —— 存量 quarantine_noise ×3、收紧已在代码
 - T2（observation 权威闸门）✅ 0759eb8 —— observationAuthorities 默认白名单
