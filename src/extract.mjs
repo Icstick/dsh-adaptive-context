@@ -127,6 +127,26 @@ export function isSystemInjected(text) {
 const MAX_EVENT_TEXT_CHARS = 4000
 
 /**
+ * P1-4.2（2026-09-21）：截断必须是**可见**的。
+ *
+ * 此前 4 处 slice 静默丢尾巴——账本里那 180 多行超长 evidence 没有任何标记，
+ * 下游（consolidation 蒸馏、视图重建、人肉排查）无法区分「原文就这么长」与「被砍到 4000」。
+ * 标记写进正文本身，因此 contentHash 随之变化——这正是想要的语义：
+ * 「这条是不是被截过」是内容的一部分，不是元数据。
+ *
+ * 幂等：纯函数，同一输入恒得同一输出（extract.mjs 头部的幂等契约不受影响）。
+ * 长度：结果比 4000 多约 30 字符，仍远低于写入校验上限 MAX_EVIDENCE_CONTENT_CHARS=8000。
+ * 措辞与 consolidate.mjs:164 既有标记保持一致。
+ * @param {string} t
+ * @returns {string}
+ */
+function clampText(t) {
+  const s = String(t ?? '')
+  if (s.length <= MAX_EVENT_TEXT_CHARS) return s
+  return s.slice(0, MAX_EVENT_TEXT_CHARS) + '…[truncated ' + s.length + ' chars]'
+}
+
+/**
  * 从事件提取规范化文本（content）。
  * 提取顺序：
  *   1. 事件顶层 content/text/message.content（synthetic 测试形态，content 可为字符串或块数组）
@@ -138,17 +158,17 @@ const MAX_EVENT_TEXT_CHARS = 4000
  */
 export function extractText(event) {
   const direct = event?.content ?? event?.text ?? event?.message?.content
-  if (typeof direct === 'string' && direct.trim()) return direct.trim().slice(0, MAX_EVENT_TEXT_CHARS)
+  if (typeof direct === 'string' && direct.trim()) return clampText(direct.trim())
   if (Array.isArray(direct)) {
     const t = blocksToText(direct)
-    if (t) return t.slice(0, MAX_EVENT_TEXT_CHARS)
+    if (t) return clampText(t)
   }
   const inboxText = textOfInboxMessage(event)
-  if (inboxText) return inboxText.slice(0, MAX_EVENT_TEXT_CHARS)
+  if (inboxText) return clampText(inboxText)
   const dm = event?.data?.message
   if (dm && Array.isArray(dm.content)) {
     const t = blocksToText(dm.content)
-    if (t) return t.slice(0, MAX_EVENT_TEXT_CHARS)
+    if (t) return clampText(t)
   }
   return ''
 }
