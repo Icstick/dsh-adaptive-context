@@ -274,3 +274,36 @@ test('E2：agent/inbox/spliced + kind=user → 仍摄入（用户消息不受影
   assert.equal(isEvidenceWorthy(ev), true, '用户消息应照常摄入')
   assert.equal(sourceClassOf(ev), 'user_input') // '记住：' 非纠正标记词（显式前缀收紧后）
 })
+
+// E2+（2026-09-21 复核 T4）：黑名单 → 白名单（fail-closed）。
+// DSH 官方 inbox source 枚举（deepseek-harness/docs/persistence-catalog.md）里，
+// 除 user 以外全部是机器消息。A 机 323 份会话日志实测这四类曾进账共 125 条。
+// 判据：账本 append-only（ADR-0001），误入的噪声删不掉 → 取 fail-closed。
+const NON_USER_INBOX_KINDS = ['subagent-settled', 'agent-message', 'team-message', 'goal', 'assistant', 'plugin']
+
+for (const kind of NON_USER_INBOX_KINDS) {
+  test('E2+：agent/inbox/spliced + kind=' + kind + ' → 不摄入（机器消息）', () => {
+    const ev = {
+      type: 'agent/inbox/spliced',
+      seq: 1001,
+      data: {
+        inserted: [{
+          id: 'm3',
+          role: 'user',
+          source: { kind },
+          content: [{ type: 'text', text: 'Background subagent abc finished' }],
+        }],
+      },
+    }
+    assert.equal(isEvidenceWorthy(ev), false, kind + ' 是机器消息，不应作为证据摄入')
+  })
+}
+
+test('E2+：agent/inbox/spliced + kind 缺失 → 不摄入（来源不可判定取 fail-closed）', () => {
+  const ev = {
+    type: 'agent/inbox/spliced',
+    seq: 1002,
+    data: { inserted: [{ id: 'm4', role: 'user', content: [{ type: 'text', text: '来源未知' }] }] },
+  }
+  assert.equal(isEvidenceWorthy(ev), false)
+})

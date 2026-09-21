@@ -17,6 +17,22 @@ import { agentAuthoredAuthority } from './governance.mjs'
 /** 可摄入的 DSH session event 类型前缀/名称 */
 const WORTHY_PREFIXES = ['user/', 'assistant/', 'tool/', 'turn/', 'agent/inbox/spliced']
 
+/**
+ * agent/inbox/spliced 的**可摄入** source.kind 白名单（fail-closed）。
+ *
+ * 枚举取自 DSH 官方持久化目录（deepseek-harness/docs/persistence-catalog.md 的 inbox source）：
+ *   user / plugin / assistant / agent-message / team-message / subagent-settled / goal
+ * 其中只有 user 是真人输入，其余全部由机器生成。
+ *
+ * 为什么用白名单而不是补黑名单：账本 append-only（ADR-0001），误入的噪声**删不掉**；
+ * 而漏掉的真内容在会话日志里仍有原文，可由 turn/end consolidation 事后补捞。
+ * 因此新增 kind 应当由本文件显式放行，而不是默认放行。
+ *
+ * 实测依据（2026-09-21，A 机 323 份会话日志 / 162,266 事件）：
+ *   入账 spliced 消息的 kind 分布 = user 1007 / subagent-settled 38 / agent-message 56 / team-message 8 / goal 23。
+ */
+const INSERTABLE_INBOX_KINDS = new Set(['user'])
+
 /** 用户明确纠正的标记（事件类型或内容特征） */
 const CORRECTION_MARKERS = [
   '更正', '纠正', '不对', '不是', '错了', '改成', '改为', '不要',
@@ -80,9 +96,12 @@ export function isEvidenceWorthy(event) {
     // E2（2026-09-07 审计 T3）：assistant 输出经 inbox 派发时 inserted[0].source.kind==='assistant'。
     // 模型输出不是"证据"——agent 自产内容全量入账曾致 5200+/6062 条（85.8%）账本噪声。
     // 经验沉淀走：用户确认 → user 消息；或 turn/end → consolidation（候选蒸馏）。
-    // assistant 消息在此不摄入（保守：宁可少记 agent 自述，不污染 user 轨与蒸馏输入）。
+    // E2+（2026-09-21 复核 T4）：黑名单 → 白名单（fail-closed）。原条件只挡 assistant/agent/plugin，
+    // 实测漏进四类机器消息（323 份会话日志实测 125 条）：
+    //   subagent-settled 38（Background subagent … finished 横幅）/ agent-message 56 / team-message 8 / goal 23
+    // 详见 INSERTABLE_INBOX_KINDS 注释。
     const kind = event?.data?.inserted?.[0]?.source?.kind ?? ''
-    if (kind === 'assistant' || kind === 'agent' || kind === 'plugin') return false
+    if (!INSERTABLE_INBOX_KINDS.has(kind)) return false
     return !!text
   }
   return WORTHY_PREFIXES.some((p) => type.startsWith(p)) && !!text
