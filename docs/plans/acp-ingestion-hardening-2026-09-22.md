@@ -19,6 +19,15 @@
 |---|---|
 | `ab95bed` | `fix(tools)`：acp_query 的 observation 面按 `observedAt` 倒序（原为固定返回最老 N 条） |
 | `4c43b66` | `feat(scripts)`：新增只读账本体检 `scripts/ledger-audit.mjs`（+5 例测试） |
+| `219187b` | `docs(plans)`：本草案 |
+| `23518a5` | `feat(acp)`：摄入面加固 C/A1/B1 |
+| `0ffe726` | `docs`：README 同步 + 草案记定案 |
+| `c3dcb6a` | `test(ingest)`：摄入链端到端用例（真 apply 接线） |
+| `454c260` | `feat(scripts)`：存量隔离候选清单 `ledger-quarantine-candidates.mjs` |
+| `9685b8e` | `fix(index)`：`subagentDowngrade` 补 `?? true` 安全网（§7 第 3 项已落地） |
+| `d90e38e` | `feat(scripts)`：存量隔离执行器 `ledger-quarantine-apply.mjs`（默认 dry-run + 自动备份） |
+
+2026-09-22 已 `--ff-only` 合入本地 `main`（远端 `origin/main` 仍在 `7f12557`，未 push）。
 
 验证：`node --test "test/*.test.mjs"` 452/452 · `oxlint` 0/0 · `depcruise` clean · 已重启实证工具面生效。
 
@@ -175,7 +184,7 @@ B1 的影响面已核实：全机 16 个已安装插件里，只有 `dsh-context
 
 ## 7. 遗留待拍板
 
-3. **`subagentDowngrade` 的默认值安全网**（2026-09-22 写 e2e 用例时暴露）：`src/index.mjs` 里
+3. ~~**`subagentDowngrade` 的默认值安全网**~~ —— **已落地（`9685b8e`）**，并补了「故意不传该键仍降权」的断言。原记录：`src/index.mjs` 里
    `config.subagentDowngrade === true` 没有 `?? true` 兜底，而同文件其它配置读法都带了
    （`startupRebuild ?? true`、`recallLimit ?? 20`、`crossSessionPolicy ?? 'non-instructional'`）。
    生产环境由宿主套用 Config schema 默认值所以目前是 true；一旦某个宿主/直调路径没套默认值，
