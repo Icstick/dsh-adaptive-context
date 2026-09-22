@@ -3,8 +3,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PROFILE_ARRAYS, PROFILE_DOMAIN_ARRAY, PROFILE_EMPTY_IN_MVP,
+  PROFILE_ARRAYS, PROFILE_DOMAIN_ARRAY, PROFILE_EMPTY_IN_MVP, PROFILE_WEIGHT,
   profileArrayOf, isProfileDomain, buildProfile, profileRefs, profileToCandidates,
+  computeProfileWeight,
 } from '../src/profile.mjs'
 
 const OBS = (over = {}) => ({
@@ -83,6 +84,56 @@ test('profileToCandidates：空/缺省 profile 返回空数组（fail-open）', 
   assert.deepEqual(profileToCandidates(null, 'user-global'), [])
   assert.deepEqual(profileToCandidates(undefined, 'user-global'), [])
   assert.deepEqual(profileToCandidates(buildProfile([]), 'user-global'), [])
+})
+
+test('computeProfileWeight：base / 支撑 / 复现 / 批准 各自加成，且封顶', () => {
+  assert.equal(computeProfileWeight(1, {}).weight, PROFILE_WEIGHT.base, '无信号 = base')
+  assert.equal(computeProfileWeight(0, {}).weight, PROFILE_WEIGHT.base, '0 条证据不扣分')
+  assert.ok(computeProfileWeight(3, {}).weight > PROFILE_WEIGHT.base, '多支撑更重')
+  assert.ok(computeProfileWeight(1, { days: 3 }).weight > PROFILE_WEIGHT.base, '跨日更重')
+  assert.ok(computeProfileWeight(1, { confirmed: true }).weight > PROFILE_WEIGHT.base, '批准更重')
+  // 封顶作用在**加成**上：超过 evidenceMax 条之后再加也不涨
+  const capped = { ...PROFILE_WEIGHT, evidenceMax: 4 }
+  assert.equal(computeProfileWeight(5, {}, capped).weight,
+    computeProfileWeight(99, {}, capped).weight, '支撑加成封顶')
+  assert.equal(computeProfileWeight(99, { days: 99, confirmed: true }).weight, PROFILE_WEIGHT.cap, '总上限')
+})
+
+test('computeProfileWeight：signals 如实回填（可解释「为什么这条排前面」）', () => {
+  const { signals } = computeProfileWeight(3, { days: 2, sessions: 4, confirmed: true })
+  assert.deepEqual(signals, { evidenceCount: 3, days: 2, sessions: 4, confirmed: true })
+})
+
+test('buildProfile：weight 由「自身证据条数 + support 信号」共同决定', () => {
+  const strong = OBS({ id: 'obs_strong', evidenceIds: ['e1', 'e2', 'e3'] })
+  const weak = OBS({ id: 'obs_weak', evidenceIds: ['e1'] })
+  const base = buildProfile([strong, weak])
+  const baseById = Object.fromEntries(base.preferences.map((r) => [r.observationId, r]))
+  // evidenceCount 来自 observation 自身（不依赖 support），所以即使没有 support，
+  // 支撑多的那条也已经比 base 重——support 只补「跨日/批准」这两类外部信号。
+  assert.equal(baseById.obs_weak.weight, PROFILE_WEIGHT.base, '1 条证据 + 无 support = base')
+  assert.equal(baseById.obs_strong.signals.evidenceCount, 3)
+  assert.ok(baseById.obs_strong.weight > baseById.obs_weak.weight, '仅凭证据条数就已拉开')
+
+  const withSupport = buildProfile([strong, weak], {
+    support: new Map([['obs_strong', { days: 3, sessions: 4, confirmed: true }]]),
+  })
+  const byId = Object.fromEntries(withSupport.preferences.map((r) => [r.observationId, r]))
+  assert.ok(byId.obs_strong.weight > byId.obs_weak.weight, '强信号条目更重')
+  assert.equal(byId.obs_strong.signals.confirmed, true)
+  assert.equal(byId.obs_weak.signals.days, 0)
+})
+
+test('profileToCandidates：weight 落到 confidence；**authority 原样不动**（Confidence is not authority）', () => {
+  const p = buildProfile([OBS({ id: 'obs_w', authority: 'single_observation', evidenceIds: ['e1', 'e2'] })], {
+    scopeId: 'user-global',
+    support: new Map([['obs_w', { days: 2, confirmed: true }]]),
+  })
+  const c = profileToCandidates(p, 'user-global')[0]
+  assert.ok(c.confidence > PROFILE_WEIGHT.base, 'confidence 被加权抬起')
+  assert.equal(c.authority, 'single_observation', 'authority 绝不因加权而变')
+  assert.equal(c.profileWeight, c.confidence)
+  assert.equal(c.profileSignals.confirmed, true)
 })
 
 test('buildProfile：空文本的 ref 仍进 Profile（可追溯），但不成候选', () => {

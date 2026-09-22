@@ -601,8 +601,33 @@ export function apply(ctx, config = {}) {
               ephemeralDropped += 1
               return false
             })
-          // A0：画像域交给 Profile（内容同源、分组不同）；非画像域照旧直接成候选。
-          profileView = buildProfile(keptObservations.filter((o) => isProfileDomain(o.claimDomain)), { scopeId })
+          // A0（+加权）：画像域交给 Profile（内容同源、分组不同）；非画像域照旧直接成候选。
+          // support：从 dreaming 候选池取复现/批准信号，喂给 Profile 的加权。
+          // 失败/旧库（无 candidate_memory 表）→ 空 Map，权重退化为 base，fail-open。
+          let profileSupport = new Map()
+          try {
+            const pool = typeof ledger.queryCandidateMemory === 'function'
+              ? ledger.queryCandidateMemory({ limit: 500 }).items
+              : []
+            for (const c of pool) {
+              for (const oid of c.observationIds ?? []) {
+                const prev = profileSupport.get(oid)
+                // 同一 observation 可能落在多个簇：取最强信号，不叠加（叠加会随聚类变化抖动）
+                profileSupport.set(oid, {
+                  days: Math.max(prev?.days ?? 0, c.days ?? 0),
+                  sessions: Math.max(prev?.sessions ?? 0, (c.sessions ?? []).length),
+                  confirmed: Boolean(prev?.confirmed) || c.state === 'approved',
+                })
+              }
+            }
+          } catch (err) {
+            ctx.logger?.debug?.('[acp] profile support unavailable: '
+              + (err instanceof Error ? err.message : String(err)) + '（加权退化为 base）')
+          }
+          profileView = buildProfile(keptObservations.filter((o) => isProfileDomain(o.claimDomain)), {
+            scopeId,
+            support: profileSupport,
+          })
           observationCandidates = keptObservations
             .filter((o) => !isProfileDomain(o.claimDomain))
             .map((o) => observationToCandidate(o, scopeId))

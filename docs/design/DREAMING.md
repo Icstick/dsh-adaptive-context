@@ -322,9 +322,42 @@ P2 只是把 dream-export 的输出目标从「本地 JSONL 交给人」换成�
 1. **`budget.test` 守护的 800 token 配额**——全量测试通过，三级承诺未回退。
 2. **候选降幅**——实测见 §12.5。
 
-### 12.5 实测：语义目标达成，但**注入面几乎没变**（与预期不符）
+### 12.4 Profile 加权（2026-09-22 已落地）
 
-用同一份 live 账本跑 `compose()` 对比两套装配（`maxTokens 1600` + 生产配额）：
+**问题**：Profile 原本只按 `observedAt` 排序——「同一件事在 5 个会话里说了 6 次」和「随口提了一句」待遇完全一样。
+而画像段是饱和的，进谁不进谁**完全由排序决定**。
+
+**三个确定性信号**（全部可从库里现算，零 LLM）：
+
+| 信号 | 来源 | 含义 |
+|---|---|---|
+| `evidenceCount` | `observation.evidenceIds.length`（自身字段，不依赖候选池） | 支撑强度 |
+| `days` | `candidate_memory.days`（按 observationIds 匹配） | 复现稳定性 |
+| `confirmed` | `candidate_memory.state === 'approved'` | 人工批准 |
+
+`weight = clamp(base 0.6 + min(ev-1,4)×0.08 + min(days-1,3)×0.08 + confirmed×0.12, 0, 0.95)`
+
+**纪律：只动 `confidence`，不碰 `authority`。** authority 是「写入时确定性声明」的安全核心（铁律 2/3），
+五铁律也写明 Confidence is not authority——加权只能影响排序。有测试钉死这条。
+
+**实测（同一 live 账本）**：
+
+- 权重确实拉开：无加权均值 0.645 → 加权均值 **0.688**；最高 0.80（`evidenceCount 2 + confirmed`）
+- **但入选集完全没变**（26 → 26，`onlyInA`/`onlyInB` 皆空），user_model token 779 → 779
+- 只有**块内顺序**变了（第 6 位从 `obs_18b7158d` 换成 `obs_144be52e`）
+
+**为什么无效**：画像段**没有竞争**——25 个 Profile 候选全部入选（容量约 26）。
+候选数 ≈ 容量，排序无从发挥。按当前蒸馏速率，画像域 observation 会持续增长，**再涨一两条就会跨过临界**。
+所以这一版是「部署好了，还没轮到它上场」，不是「没用」。
+
+### 12.5 实测：A0 换血效果（含一次测量口径错误）
+
+> **先记一次错误**：本节初稿把 sessionId 取成 `ledger.query(...)[0].sessionId`（随便一个会话），得出
+> 「注入面几乎没变」的结论——**那是错的**。随便挑的会话没有同会话证据，而真实会话里同会话的
+> `user_input` 正是填满 `user_model` 的主力。改用真实会话重测后结论反转（见下表）。
+> **教训：测注入面必须用真实会话的 sessionId。**
+
+用同一份 live 账本跑 `compose()` 对比两套装配（`maxTokens 1600` + 生产配额，**本会话 sessionId**）：
 
 | | 候选数 | admitted | user_model tok | work_state | memory | expression | total |
 |---|---:|---:|---:|---:|---:|---:|---:|

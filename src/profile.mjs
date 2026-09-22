@@ -39,6 +39,53 @@ export function isProfileDomain(claimDomain) {
   return profileArrayOf(claimDomain) !== null
 }
 
+/**
+ * 加权（2026-09-22）：Profile 此前只按 observedAt 排序——「同一件事说了 6 次」和「随口提了一句」
+ * 待遇完全一样。而 user_model 段是**饱和**的（766/800），进谁不进谁完全由排序决定，
+ * 所以权重直接决定注入内容。三个确定性信号，全部可从库里现算：
+ *
+ *   evidenceCount  该 observation 的溯源证据条数（支撑强度）
+ *   days          所属 dreaming 候选跨了几个自然日（复现稳定性；无候选时为 0）
+ *   confirmed     该候选是否被人工批准（candidate_memory.state='approved'）
+ *
+ * 纪律：**只动 confidence，不碰 authority**。authority 是「写入时确定性声明」的安全核心
+ * （AGENTS.md 铁律 2/3），且五铁律写明 Confidence is not authority——加权只能影响排序。
+ */
+export const PROFILE_WEIGHT = Object.freeze({
+  base: 0.6,          // 与 observationToCandidate 的 confidence 一致（不加权时的原值）
+  evidenceStep: 0.08, // 每多一条支撑证据
+  evidenceMax: 4,     // 支撑加成封顶条数（+0.32）
+  recurrenceStep: 0.08, // 每多跨一个自然日
+  recurrenceMax: 3,   // 复现加成封顶天数（+0.24）
+  confirmedBonus: 0.12, // 人工批准
+  cap: 0.95,          // 上限（不宣称确定）
+})
+
+/**
+ * 计算一条 Profile ref 的权重（纯函数、确定性）。
+ * @param {number} evidenceCount
+ * @param {{days?: number, sessions?: number, confirmed?: boolean}} [support]
+ * @param {object} [cfg] - 覆盖 PROFILE_WEIGHT（测试用）
+ * @returns {{weight: number, signals: object}}
+ */
+export function computeProfileWeight(evidenceCount, support = {}, cfg = PROFILE_WEIGHT) {
+  const ev = Math.max(0, Number(evidenceCount) || 0)
+  const days = Math.max(0, Number(support.days) || 0)
+  const evBonus = Math.min(Math.max(0, ev - 1), cfg.evidenceMax) * cfg.evidenceStep
+  const recBonus = Math.min(Math.max(0, days - 1), cfg.recurrenceMax) * cfg.recurrenceStep
+  const confBonus = support.confirmed ? cfg.confirmedBonus : 0
+  const raw = cfg.base + evBonus + recBonus + confBonus
+  return {
+    weight: Math.min(Math.round(raw * 1000) / 1000, cfg.cap),
+    signals: {
+      evidenceCount: ev,
+      days,
+      sessions: Math.max(0, Number(support.sessions) || 0),
+      confirmed: Boolean(support.confirmed),
+    },
+  }
+}
+
 function sortKey(o) {
   return [String(o?.observedAt ?? o?.createdAt ?? ''), String(o?.id ?? '')]
 }
@@ -49,9 +96,14 @@ function sortKey(o) {
  * 因此 Profile item → Observation → Evidence → session event 三级回链可走通。
  * @param {object[]} observations - observation 行（camelCase）
  * @param {object} [opts]
+ * @param {Map<string, {days?:number, sessions?:number, confirmed?:boolean}>} [opts.support]
+ *        复现/批准信号（来自 candidate_memory）。缺省 → 全部按 base 权重，fail-open。
  * @returns {object} Profile（对应 CONTRACTS.md §4 的 interface）
  */
 export function buildProfile(observations, opts = {}) {
+  // support：Map<observationId, {days, sessions, confirmed}>，由调用方从 candidate_memory 构建。
+  // 缺省（旧库 schema<7 / 查询失败）→ 空 Map → 权重退化为 base，fail-open。
+  const support = opts.support instanceof Map ? opts.support : new Map()
   const profile = {
     subjectId: opts.scopeId ?? 'user-global',
     generatedAt: opts.generatedAt ?? null,
@@ -69,14 +121,18 @@ export function buildProfile(observations, opts = {}) {
     })
 
   for (const o of rows) {
+    const evidenceIds = Array.isArray(o.evidenceIds) ? o.evidenceIds : []
+    const { weight, signals } = computeProfileWeight(evidenceIds.length, support.get(o.id) ?? {})
     profile[profileArrayOf(o.claimDomain)].push({
       observationId: o.id,
+      weight,
+      signals,
       subject: o.subject ?? '',
       predicate: o.predicate ?? '',
       claimDomain: o.claimDomain,
       text: String(o.text ?? ''),
       authority: o.authority ?? 'single_observation',
-      evidenceIds: Array.isArray(o.evidenceIds) ? o.evidenceIds : [],
+      evidenceIds,
       observedAt: o.observedAt ?? null,
     })
   }
@@ -118,5 +174,9 @@ export function profileToCandidates(profile, fallbackScopeId) {
         observedAt: r.observedAt,
       }, fallbackScopeId),
       profileArray: r.array,
+      profileWeight: r.weight,
+      profileSignals: r.signals,
+      // 加权落到 confidence（排序信号），**不碰 authority**——见 PROFILE_WEIGHT 的纪律说明。
+      confidence: typeof r.weight === 'number' ? r.weight : 0.6,
     }))
 }
