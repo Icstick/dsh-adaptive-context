@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 // 存量库 ALTER TABLE，旧行 authority=NULL（读侧回退 single_observation）。
 // v6（2026-09-07，T4 M4.1）：新增 rule 表（反馈通道规则——独立一等对象，
 // evidence_ids 互链；draft/active/rejected/superseded 状态机）。
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 export const DEFAULT_DB_NAME = 'acp-ledger.db'
 
 /** Evidence 状态机 */
@@ -144,3 +144,22 @@ export function evidenceIdOf({ sourceRef, contentHash }) {
   const src = sourceRef ? JSON.stringify(sourceRef) : ''
   return 'ev_' + hashHex(src + '|' + contentHash).slice(0, 24)
 }
+
+// ── Dreaming（离线巩固，2026-09-22）────────────────────────────────────────
+// 设计见 docs/design/DREAMING.md。第一增量只做三件确定性的事：归并 / 复现计数 / 遗忘（全零 LLM）。
+
+/** 候选记忆状态机（对齐 wv-20260901-001 的 candidate→observed→consensus→approved，加 rejected） */
+export const CANDIDATE_MEMORY_STATES = Object.freeze([
+  'candidate', 'observed', 'consensus', 'approved', 'rejected',
+])
+/** 归并判据：同 claimDomain 内 CJK bigram Jaccard ≥ 此值 → 同簇（1 = 只有完全相同才合并） */
+export const DREAM_CLUSTER_JACCARD = 0.55
+/** 簇内成员数 ≥ 此值才算「复现」 */
+export const DREAM_OCCURRENCE_MIN = 2
+/** 复现门槛：跨 ≥N 个不同 session 或 ≥N 个不同自然日 → consensus */
+export const DREAM_SESSION_MIN = 2
+export const DREAM_DAY_MIN = 2
+/** 遗忘（只做标记，不删）：superseded observation / quarantined evidence 超过此天数进冷存清单 */
+export const DREAM_ARCHIVE_DAYS = 90
+/** 簇代表正文上限（与 observation text 上限一致，防止代表行超长） */
+export const DREAM_REPRESENTATIVE_MAX_CHARS = 500
