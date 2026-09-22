@@ -17,6 +17,7 @@
 | PROVIDERS.md | RecallProvider 契约与 MemOS 接入 |
 | EXPRESSION.md | Expression 域设计（promotion 状态机规格） |
 | CONSOLIDATION.md | Background consolidation 设计 |
+| DREAMING.md | **Dreaming 离线巩固 / Profile 画像**（2026-09-22 新；含实测记录、weaver 通道、云端 staging 方案） |
 | SCHEMA-REVIEW.md | Schema 评审记录 |
 | BENCHMARK.md | 验收 KPI 与实验矩阵 |
 | benchmark-results/ | A/B/F/G 实测结果归档 |

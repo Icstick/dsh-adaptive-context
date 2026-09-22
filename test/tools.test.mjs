@@ -96,3 +96,37 @@ test('buildAcpQueryToolSpec：rc.1 形状 + execute + 读审计', async () => {
   assert.equal(audit.items[0].op, 'model_query')
 })
 
+// ---------------------------------------------------------------
+// 2026-09-22（W 机账本审计 §五）：observation 面回归。
+// listObservations 是 created_at ASC 快照口径，工具面曾直接 slice →
+// 永远返回最老的 N 条，最新蒸馏结论不可见。
+// ---------------------------------------------------------------
+test('acp_query：observation 按 observedAt 倒序（最新优先）', () => {
+  const { ledger } = makeEnv()
+  const base = { claimDomain: 'user_fact', evidenceIds: [] }
+  ledger.upsertObservation({ ...base, subject: '旧', predicate: 'states', text: '最老的一条', observedAt: '2026-09-17T01:00:00.000Z' })
+  ledger.upsertObservation({ ...base, subject: '中', predicate: 'states', text: '中间的一条', observedAt: '2026-09-20T01:00:00.000Z' })
+  ledger.upsertObservation({ ...base, subject: '新', predicate: 'states', text: '最新的一条', observedAt: '2026-09-22T01:00:00.000Z' })
+
+  const all = queryLedgerForTool({ ledger }, {})
+  assert.equal(all.observations.length, 3)
+  assert.deepEqual(all.observations.map((o) => o.subject), ['新', '中', '旧'])
+
+  // limit 截断必须留下最新的一条，而不是最老的一条（旧行为的直接反例）
+  const one = queryLedgerForTool({ ledger }, { limit: 1 })
+  assert.equal(one.observations.length, 1)
+  assert.equal(one.observations[0].subject, '新')
+})
+
+test('acp_query：同 observedAt 时 observation 顺序确定（按 id 兜底）', () => {
+  const { ledger } = makeEnv()
+  const at = '2026-09-22T02:00:00.000Z'
+  const base = { claimDomain: 'work', evidenceIds: [], observedAt: at }
+  ledger.upsertObservation({ ...base, subject: 'A', predicate: 'states', text: 'A 条' })
+  ledger.upsertObservation({ ...base, subject: 'B', predicate: 'states', text: 'B 条' })
+  const first = queryLedgerForTool({ ledger }, {}).observations.map((o) => o.id)
+  const second = queryLedgerForTool({ ledger }, {}).observations.map((o) => o.id)
+  assert.deepEqual(first, second, '两次查询顺序应稳定')
+  assert.deepEqual(first, [...first].sort((x, y) => y.localeCompare(x)), '同 observedAt 时按 id 倒序兜底')
+})
+

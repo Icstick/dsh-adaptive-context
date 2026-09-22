@@ -16,7 +16,9 @@ import { resolveDshHome } from './home.mjs'
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
-import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { isEvidenceWorthy, toEvidenceCandidate, sessionTypeOf } from './extract.mjs'
+// A0（2026-09-22）：Profile 物化视图——user_model 段的候选源，由 observation 构建。
+import { buildProfile, isProfileDomain, profileToCandidates } from './profile.mjs'
 import { isNeverApprovalPolicy } from './expression.mjs'
 import { maybeDraft } from './feedback.mjs'
 import { makeAcpQueryTool } from './tools.mjs'
@@ -285,45 +287,9 @@ export function viewRowToCandidate(r, fallbackScopeId) {
   }
 }
 
-/**
- * P1-1（2026-09-02）：Observation → composer 候选。
- *
- * 背景：observation 层（subject/predicate/text≤500 的浓缩认知）**写了从来没人读**——
- * 4 个查询接口在生产代码零调用方，8 条 observation 从未进过注入。而"索引常驻、正文按需"
- * 这套两段式注入需要的浓缩层，其实已经躺在库里。
- *
- * 权威定级（P3，2026-09-07，PLAN-S2 §8.3 修正）：observation 是蒸馏产物 ≠ 原始 evidence，
- * 其权威来自溯源证据（store.upsertObservation 写行时按 evidenceIds 聚合落 authority 列，
- * 见 store.deriveObservationAuthority）。行 authority 缺失/未知（旧行、无溯源）回退
- * single_observation——单次观察不得影响 user_preference/style（矩阵兜底）。
- * confidence 0.6：不宣称权威（五铁律：Confidence is not authority）。
- *
- * 注入面标签 sourceClass='observation'：只用于渲染标签与候选语义，不参与写入侧
- * sourceClass 枚举（那 5 值是写边界约束）。无 sessionId → 不过跨会话闸门、不罚降权
- * （稳定画像全局可见 = P3 放行语义；原始 user_input 的 F7 闸门不受影响）。
- */
-export function observationToCandidate(o, fallbackScopeId) {
-  const subject = String(o.subject ?? '').trim()
-  const predicate = String(o.predicate ?? '').trim()
-  const text = String(o.text ?? '').trim()
-  const head = subject && predicate ? subject + ' ' + predicate + '：' : ''
-  return {
-    id: o.id,
-    content: head + text,
-    sourceClass: 'observation',
-    claimDomain: o.claimDomain ?? 'experience',
-    authority: o.authority ?? 'single_observation',
-    confidence: 0.6,
-    durability: 0.6,
-    sensitivity: 'private',
-    state: 'active',
-    scopeId: o.scopeId ?? fallbackScopeId,
-    observedAt: o.createdAt ?? o.observedAt,
-    sourceRef: { kind: 'observation', evidenceIds: o.evidenceIds ?? [] },
-    evidenceIds: o.evidenceIds ?? [],
-    isObservation: true,
-  }
-}
+// observationToCandidate 已搬到 src/candidates.mjs（2026-09-22）：Profile 视图要复用它，
+// 留在本文件会形成 index → profile → index 的循环依赖。此处 re-export 保持既有调用方不变。
+export { observationToCandidate } from './candidates.mjs'
 
 /** 设置页配置命名空间（2026-08-30：设置 → 插件 → 插件配置；settings.yaml 持久化） */
 export const SETTINGS_NAMESPACE = 'adaptive-context'
@@ -546,12 +512,20 @@ export function apply(ctx, config = {}) {
         scopeId: scopeOf(ctx),
         sessionId: session?.id ?? '',
         agentKey: event.agentKey ?? '',
-        sessionType: event.sessionType ?? 'root',
-        // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine
-        subagent: config.subagentDowngrade === true && session?.header?.origin === 'subagent',
+        // C（2026-09-22）：会话类型从 session.header.origin 派生。此前读的是**事件**上的
+        // sessionType —— 事件没有该字段，于是账本 session_type 恒为 'root'（W 机实测 2400/2400、
+        // subagent 零条），读侧按会话类型隔离无从下手。派生子见 extract.sessionTypeOf。
+        sessionType: sessionTypeOf(session),
+        // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine。
+        // 2026-09-22：补 `?? true` 默认值安全网。apply() 不套用 Config 的 schema 默认值（那是宿主做的），
+        // 而这里的写法是 `=== true`——一旦宿主/直调路径没套默认，降权会静默关闭，子代理父任务书
+        // 会被记成 user_explicit（写 e2e 用例时实测到过）。同文件其它配置读法都带了 `??` 兜底。
+        subagent: (config.subagentDowngrade ?? true) === true && session?.header?.origin === 'subagent',
       })
       if (!ev) return
-      const res = acp.append(ev)
+      // B1（2026-09-22）：显式声明来源，才能过 append 的摄入闸门；
+      // 未声明的直写会被强制 quarantine（见 service.mjs append 注释）。
+      const res = acp.append({ ...ev, ingest: 'session-event' })
       // 审计：已落 acp audit 表（M3 C1）；harness 若收录 acp/* 词汇可再 append session event
       if (config.debug) {
         ctx.logger?.debug?.('[acp] ingest ' + res.decision + ' id=' + res.id)
@@ -579,10 +553,14 @@ export function apply(ctx, config = {}) {
       // 会话分层（2026-08-30，ISSUES-INJECTION-ISOLATION.md F5/F7）：
       // 本会话全类别 + 跨会话受限（类别闸门与惩罚由 compose 的 currentSessionId 处理）。
       const sessionId = payload?.agent?.session?.id ?? ''
+      // A0（2026-09-22）：画像两域（user_fact / user_preference）**不再从 evidence 直供**——
+      // 改由 Profile 视图（由 observation 构建）承担。改动前 user_model 段被 228 条真人短消息
+      // （「继续」「重启好了」）塞到 121% 超配；画像本该是蒸馏过的稳定结论，不是原始消息流。
+      // 其余域仍走 evidence 直供，行为不变。
       const ledgerCandidates = [
         ...ledger.query({ scopeId, state: 'active', sessionId, limit: config.recallLimit ?? 20 }).items,
         ...ledger.query({ scopeId, state: 'active', sessionId: { not: sessionId }, limit: config.recallLimit ?? 20 }).items,
-      ]
+      ].filter((c) => !isProfileDomain(c.claimDomain))
 
       // —— M3 B3：materialized view 注入（expression section hot path）——
       // readExpression() 有内容 → 注入 style 候选（promoted 候选 → view 行，快照自足）；
@@ -597,6 +575,7 @@ export function apply(ctx, config = {}) {
 
       // —— P1-1：Observation 注入（默认冻结，config.observationInjection 打开）——
       let observationCandidates = []
+      let profileView = null
       if (config.observationInjection === true) {
         try {
           // T2（2026-09-07）：权威闸门——queryObservation 按 authorities 过滤，不再全表 listObservations(scopeId) 每轮拉取全部 active observation（1729+ 条含大量 single_observation 噪声）
@@ -611,16 +590,46 @@ export function apply(ctx, config = {}) {
           //   shadow（默认）= 只统计不生效；on = 真过滤；off = 关闭。
           const ephemeralMode = config.preferenceEphemeralFilter ?? 'shadow'
           let ephemeralDropped = 0
-          observationCandidates = (Array.isArray(rows) ? rows : [])
+          const keptObservations = (Array.isArray(rows) ? rows : [])
             .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
             // T2.5（2026-09-07）：动作流水形态不进注入（「用户 询问/确认/审批…」是
             // 会话转写，非画像——authority 聚合虚高导致过闸门）
             .filter((o) => !isActionFlowObservation(o.subject, o.predicate))
             .filter((o) => {
               const allowed = preferenceFilterAllows(o, ephemeralMode)
-              if (!allowed) ephemeralDropped += 1
-              return allowed
+              if (allowed) return true
+              ephemeralDropped += 1
+              return false
             })
+          // A0（+加权）：画像域交给 Profile（内容同源、分组不同）；非画像域照旧直接成候选。
+          // support：从 dreaming 候选池取复现/批准信号，喂给 Profile 的加权。
+          // 失败/旧库（无 candidate_memory 表）→ 空 Map，权重退化为 base，fail-open。
+          let profileSupport = new Map()
+          try {
+            const pool = typeof ledger.queryCandidateMemory === 'function'
+              ? ledger.queryCandidateMemory({ limit: 500 }).items
+              : []
+            for (const c of pool) {
+              for (const oid of c.observationIds ?? []) {
+                const prev = profileSupport.get(oid)
+                // 同一 observation 可能落在多个簇：取最强信号，不叠加（叠加会随聚类变化抖动）
+                profileSupport.set(oid, {
+                  days: Math.max(prev?.days ?? 0, c.days ?? 0),
+                  sessions: Math.max(prev?.sessions ?? 0, (c.sessions ?? []).length),
+                  confirmed: Boolean(prev?.confirmed) || c.state === 'approved',
+                })
+              }
+            }
+          } catch (err) {
+            ctx.logger?.debug?.('[acp] profile support unavailable: '
+              + (err instanceof Error ? err.message : String(err)) + '（加权退化为 base）')
+          }
+          profileView = buildProfile(keptObservations.filter((o) => isProfileDomain(o.claimDomain)), {
+            scopeId,
+            support: profileSupport,
+          })
+          observationCandidates = keptObservations
+            .filter((o) => !isProfileDomain(o.claimDomain))
             .map((o) => observationToCandidate(o, scopeId))
           if (ephemeralMode !== 'off' && ephemeralDropped > 0) {
             ctx.logger?.debug?.('[acp] ephemeral_preference mode=' + ephemeralMode
@@ -631,6 +640,10 @@ export function apply(ctx, config = {}) {
             + (err instanceof Error ? err.message : String(err)))
         }
       }
+
+      // A0：Profile → 候选。profileView 为空（observationInjection 关闭/读取失败）时为空数组，
+      // 注入面退化为「只有 evidence 与规则」——fail-open，不阻断 turn。
+      const profileCandidates = profileView ? profileToCandidates(profileView, scopeId) : []
 
       // —— Provider recall（M3 A1）：registry 并行召回，semantic 分来源（COMPOSER.md §4）——
       // hasProvider = registry 有启用 provider（provider 自适应权重切换）；
@@ -682,7 +695,7 @@ export function apply(ctx, config = {}) {
       } catch (err) {
         ctx.logger?.warn?.('[acp] rule candidates failed: ' + (err instanceof Error ? err.message : String(err)))
       }
-      const result = compose([...ruleCandidates, ...ledgerCandidates, ...viewCandidates, ...observationCandidates, ...recallCandidates], {
+      const result = compose([...ruleCandidates, ...ledgerCandidates, ...viewCandidates, ...profileCandidates, ...observationCandidates, ...recallCandidates], {
         query: userText,
         scopeId,
         hasProvider,

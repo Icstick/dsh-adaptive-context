@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import {
   isEvidenceWorthy, extractText, sourceClassOf, authorityOf,
   claimDomainOf, isCorrection, toEvidenceCandidate, isSystemInjected,
-  isCompactionCheckpoint,
+  isCompactionCheckpoint, sessionTypeOf,
 } from '../src/extract.mjs'
 import { evidenceIdOf } from '../src/constants.mjs'
 
@@ -47,10 +47,41 @@ test('toEvidenceCandidate 幂等：同事件两次同 id', () => {
 })
 
 test('agent 消息 → agent_authored / single_observation / experience', () => {
+  // 注：本用例只校验归类映射。assistant/message 自 A1（2026-09-22）起**不再摄入**，
+  // 见下面的 isEvidenceWorthy 用例；映射函数本身保持可用（其它路径仍需要它）。
   const ev = { type: 'assistant/message', id: 'e7', content: '我检查了配置文件' }
   assert.equal(sourceClassOf(ev), 'agent_authored')
   assert.equal(authorityOf(ev), 'single_observation')
   assert.equal(claimDomainOf(ev), 'experience')
+})
+
+// ---------------------------------------------------------------
+// A1（2026-09-22）：assistant 模型输出不再摄入。
+// 账本 append-only，误入的噪声删不掉 → fail-closed（与 7f12557 同一取舍）。
+// tool/ 暂留（external_information 设计意图），此处一并钉住免得被顺手改掉。
+// ---------------------------------------------------------------
+test('A1：assistant/message 不摄入；user/tool/turn 仍摄入', () => {
+  assert.equal(isEvidenceWorthy({ type: 'assistant/message', id: 'a1', content: '我检查了配置文件' }), false)
+  assert.equal(isEvidenceWorthy({ type: 'user/message', id: 'a2', content: '用 pnpm' }), true)
+  assert.equal(isEvidenceWorthy({ type: 'tool/result', id: 'a3', content: 'exit 0' }), true)
+  assert.equal(isEvidenceWorthy({ type: 'turn/end', id: 'a4', content: 'x' }), true)
+})
+
+test('A1：toEvidenceCandidate 对 assistant/message 返回 null', () => {
+  assert.equal(toEvidenceCandidate({ type: 'assistant/message', id: 'a5', content: '过程叙述' }, { sessionId: 's1' }), null)
+})
+
+// ---------------------------------------------------------------
+// C（2026-09-22）：会话类型从 session.header.origin 派生。
+// 修之前 index.mjs 读事件上的 sessionType（不存在）→ 账本 session_type 恒为 root。
+// ---------------------------------------------------------------
+test('C：sessionTypeOf 从 header.origin 派生 root/subagent', () => {
+  assert.equal(sessionTypeOf({ header: { origin: 'subagent' } }), 'subagent')
+  assert.equal(sessionTypeOf({ header: {} }), 'root')
+  assert.equal(sessionTypeOf({}), 'root')
+  assert.equal(sessionTypeOf(undefined), 'root')
+  // 事件上的 sessionType 不再参与判定（旧实现读的就是这个，永远是 undefined）
+  assert.equal(sessionTypeOf({ header: {}, sessionType: 'subagent' }), 'root')
 })
 
 test('真实 DSH 事件：agent/inbox/spliced 用户消息 → user_input', () => {

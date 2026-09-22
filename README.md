@@ -43,6 +43,8 @@ ACP 想解决的问题很简单：**让记忆像账本一样清楚**。每一条
 | **表达风格晋升** | 风格候选要么过人工审批门，要么满足策略护栏才自动生效（最低门槛不可调低）；五态状态机 + 物化视图，随时可回滚 |
 | **多源路由** | 多个记忆源并行召回，各自超时、互不拖累；LLM 任务可按用途配不同模型，主路挂了自动走备路 |
 | **审计与导出** | 所有关键操作留痕（谁/何时/为什么/附带数据）；JSONL 全量导出导入（证据/观察/候选/审计）；视图可一键重建并校验 |
+| **用户画像（Profile，2026-09-22）** | `user_model` 段的候选**不再来自原始消息流**，改由 Profile 物化视图供——由蒸馏出的 observation 构建，分 `stableFacts` / `preferences` 两组，每条可回链到证据与会话。按「支撑证据数 / 跨日复现 / 人工批准」加权排序（只动排序信号，不碰 authority） |
+| **离线巩固（Dreaming，2026-09-22）** | 慢环：离线把证据与观察整理成稳定的候选结论。第一增量是**三件零 LLM 的确定性事**——归并（同域内同主体或二元组 Jaccard ≥ 阈值）、复现计数（跨会话/跨自然日）、遗忘（只出冷存清单，不删）。候选池与 observation **物理分离**，晋升必须过人工门 |
 
 ## 工作原理
 
@@ -203,16 +205,17 @@ pnpm install
 
 - **注入**：agent/pre-step waterfall——composer 汇总四源（ledger 证据 / expression 物化视图 / observation 蒸馏轨 / MemOS 等 recall provider），按 section quota + hotTokens 装箱，渲染为 source-labelled plugin user message（跨会话条目带 `session=` 标记与引导语）
 - **调度器**：宿主 inject-scheduler 为可选服务——ACP 注册 `acp.composer` 段（budget=hotTokens，token 口径；未挂 scheduler 时静默跳过，pre-step 注入照常）
-- **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计
+- **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计；两侧统一**按时间倒序**（最新优先）——observation 侧原实现直接切 `listObservations()`（created_at ASC 快照口径），固定返回最老的 N 条，最新蒸馏结论不可见（2026-09-22 修复）
 - **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
 - **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导，**取支撑证据中最弱的一条**（2026-09-09 非放大规则，防弱证据洗白强权威）；注入侧只放行白名单权威（T2）
+- **摄入边界（2026-09-22，C/A1）**：证据只从**真人输入 + 工具输出**来——`assistant/message` 形态的模型自述**不再摄入**（此前它绕过 7f12557 的 inbox 白名单，走 `WORTHY_PREFIXES` 兜底分支；W 机实测该修复落地后新入账证据里仍有 85.6% 是 agent 自产）。`tool/` 暂留（对应 external_information「工具输出补充工作经验」的设计意图）。会话类型改由 `extract.sessionTypeOf(session)` 从 `session.header.origin` 派生——此前读的是事件上的 `sessionType`（该字段不存在），账本 `session_type` 恒为 `root`
 - **审计可对账（2026-09-11）**：consolidation 的成功/失败审计行都带批次区间与首尾证据 id（`batchFrom`/`batchTo`/`batchFirstId`/`batchLastId`）——用来区分「已处理但零产出」与「被水位线跳过」；水位线只推进到**本批最大 observedAt**，空批次不写（旧实现会盖成 now，任何早于 now 的回填/时钟偏移证据都会被静默跳过）
 
 ## API（ctx.acp）
 
 | 方法 | 说明 |
 |---|---|
-| `append(input)` | 写入证据（过写入闸门 + 资格矩阵；内容重复则返回已存在的 id） |
+| `append(input)` | 写入证据（过写入闸门 + 资格矩阵；内容重复则返回已存在的 id）。**摄入闸门（2026-09-22，B1）**：需显式声明 `input.ingest`——`'session-event'`（session/event 摄入路径）/ `'user-correction'`（`correct` 快路径）过闸门后按写入闸门结论落 state；**未声明与其它来源一律落 `quarantined`**（公开服务面 fail-closed，账本 append-only 删不掉；已隔离行不注入，`release(id)` 可放行）。`ingest` 不是 evidence 列，落库前剔除 |
 | `get(id)` / `inspect(id)` | 读单条（inspect 附带治理裁决细节） |
 | `setState(id, state, opts)` | 状态迁移（正常/隔离/已取代/已脱敏） |
 | `recall({query, scopeId, targetDomain, validAt, allowSuperseded, maxTokens})` | 召回（编排的最小入口；validAt 支持历史视图）。`targetDomain` 参数 DEPRECATED（2026-09-07）：资格按候选自身 claimDomain 裁决 |
@@ -236,9 +239,60 @@ pnpm install
 - **可注入性**：单条成本 ≈ 4 token（短标签）+ 正文 1.0 token/CJK 字；**超过 40 字**（默认段配额下的安全线）的规则可能被整条丢弃——`/acp rule list` 会标 `⚠超40字安全线`，草拟期即可发现
 - **修订**：规则修订 = 新行 supersedes 旧行（lineage 回溯）；不满足闸门的纠正维持 evidence 层按需召回
 - **失效观测（B11，2026-09-12）**：新纠正与某条 active 规则 bigram 重叠 ≥0.6 → 判定"规则疑似未生效"——不再重复草拟（避免同义规则堆积），落 audit `rule_ineffective_suspect`（含 evidenceId / overlap / ruleTitle）并写日志；短文本（<10 字）不判定（防假阳性）。用途：规则太长注不进、被容量裁掉、或模型未遵守，都能从审计里看出来
+## 离线巩固：Dreaming（2026-09-22）
+
+在线快环已通（pre-step 注入 + turn/end 蒸馏），**Dreaming 是慢环**：离线把证据与观察整理成「可注入的稳定结论」，
+且**必须经过一道门**才允许晋升。设计全文见 [docs/design/DREAMING.md](docs/design/DREAMING.md)。
+
+第一增量只做**三件零 LLM 的确定性事**（`src/dream.mjs`）：
+
+| 件 | 判据 |
+|---|---|
+| **① 归并** | 同 `claimDomain` 内——同 `subject` **或** CJK 二元组 Jaccard ≥ 0.55 → 同簇 |
+| **② 复现计数** | 簇成员跨 ≥2 个不同会话 **或** ≥2 个自然日 → 升 `consensus`，否则留 `candidate` |
+| **③ 遗忘** | `superseded` observation / `quarantined` evidence 超 90 天 → 出**冷存清单**（只标记，不删） |
+
+```bash
+node scripts/dream.mjs --dir <ledgerDir>            # 预演（默认 dry-run，一行不写）
+node scripts/dream.mjs --dir <ledgerDir> --apply    # 落库：只写候选池与跑批台账，绝不写 observation
+node scripts/dream-review.mjs --dir <ledgerDir> --list [--domain work]
+node scripts/dream-review.mjs --dir <ledgerDir> --approve <id>…    # 人工审
+node scripts/dream-export.mjs --dir <ledgerDir> --state approved   # 预览可导出条目
+```
+
+**三条纪律**：① **物理分离**——候选池（`candidate_memory`）与 observation 是两张表，候选绝不直接变成 observation；
+② **不覆盖人的决定**——库里已 `approved`/`rejected` 的候选，重跑只更新统计字段；③ **只标记不删除**。
+
+### 与 weaver 的通道（分域白名单）
+
+只有 `work` / `external_fact` 两域可导出到 weaver，且必须人工审；**画像三域（`user_preference` / `user_fact` / `style`）永不出 ACP**。
+导出产物是 `wv import` 兼容的 JSONL（title 是正文**截取**不是生成，body 附溯源脚注），**由人跑最后一步**。
+理由与量级测算见 DREAMING.md §10；云端 staging 方案见 §11。
+
+## 用户画像：Profile（2026-09-22）
+
+在此之前，`user_model` 段的候选源是 **evidence 直供**——真人短消息（「继续」「重启好了」）把配额塞到 121%，
+而 `CONTRACTS.md §4` 定义的 Profile（五数组、可追溯到 session event）一行实现都没有。
+
+现在 `src/profile.mjs` 把它实现了：由 **observation**（蒸馏过的结论）构建，
+
+```
+stableFacts  ← claimDomain user_fact
+preferences  ← claimDomain user_preference
+recentState / interactionPatterns / inferredTraits   ← MVP 恒空（CONTRACTS §4：v0.1 启用）
+```
+
+- **不落盘、每步现算**：源只有几十条，派生成本≈0，而落盘视图会引入「缓存陈旧」整类故障
+- **可追溯**：每条 ref 带 `observationId` + `evidenceIds` → Observation → Evidence → session event
+- **加权**：`weight = clamp(0.6 + min(ev-1,4)×0.08 + min(days-1,3)×0.08 + approved×0.12, 0, 0.95)`，
+  落在 `confidence` 上（**排序信号**）——`authority` 是写入时确定性声明的安全核心，加权绝不碰它
+
+`work` / `style` / `experience` / `external_fact` **不进画像**（分别归 work_state / expression / memory 段）。
+
 ## 数据位置与备份
 
-- 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），六张表：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计
+- 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），**八张表**：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计 / **候选记忆（v7）** / **巩固跑批台账（v7）**
+- 账本 schema 版本在 `acp_meta.schema_version`；升级是**自动**的（打开时建表并写版本号），无需手工迁移脚本
 - 物化视图在 `ledgerDir/views/` 下，可随时重建（带校验和）
 - 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）；规则经外部脚本写入后视图不会自动刷新，用 `/acp rule rebuild` 手动重建
 - **备份/迁移**：导出（JSONL）→ 新环境导入，按内容哈希幂等合并

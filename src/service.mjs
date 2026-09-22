@@ -9,6 +9,12 @@ import { exportJsonl, importJsonl } from './export-import.mjs'
 import { rebuildView, verifyView } from './rebuild.mjs'
 
 /**
+ * 可信摄入来源（B1，2026-09-22）。
+ * 只有显式声明了来源的写入能直接落 active，其余直写一律 quarantine。理由见 append 的注释。
+ */
+const TRUSTED_INGEST = new Set(['session-event', 'user-correction'])
+
+/**
  * 生成 recall 的子串集合（OR 召回，CJK 友好）：
  * - 整串（保精度）
  * - CJK 时：连续 2 字符窗口（bigram），如 '喜欢什么风格回答' → ['喜欢','欢什','什么','么风','风格','格回','回答']
@@ -45,18 +51,36 @@ export function createAcpService({ ledger, startupRebuild = true }) {
   const auditScope = (scopeId) => (scopeId && SCOPES.includes(scopeId) ? scopeId : 'user-global')
 
   return {
-    /** 追加一条 Evidence（带 Write Guard），返回 {inserted, id, decision} */
+    /**
+     * 追加一条 Evidence（Write Guard + 摄入闸门），返回 {inserted, id, decision, reasons}。
+     *
+     * 摄入闸门（B1，2026-09-22）：append 是**公开服务面**——任何插件拿得到 ctx.acp 就能直写，
+     * 绕过 session/event 路径上的 isEvidenceWorthy()。账本 append-only（ADR-0001），误入的噪声
+     * 删不掉，因此取 fail-closed：**未显式声明来源的直写一律落 quarantined**（记录 + 可审计，
+     * 但不注入；service.release / lifecycle.rollback 可放行）。
+     *
+     * input.ingest 取值（该键不是 evidence 列，落库前剔除）：
+     *   'session-event'    session/event 摄入路径（index.mjs）→ 按写入闸门结论落 state
+     *   'user-correction'  service.correct 的用户纠正快路径 → 同上
+     *   缺省 / 其他        第三方插件直写 → 过闸门后强制 quarantined
+     */
     append(input) {
       const verdict = writeGuard(input)
       if (verdict.decision === 'block') {
         return { inserted: false, id: null, decision: 'block', reasons: verdict.reasons }
       }
+      const trusted = TRUSTED_INGEST.has(input?.ingest)
+      const quarantine = verdict.decision === 'quarantine' || !trusted
       const effectiveInput = {
         ...input,
-        state: verdict.decision === 'quarantine' ? 'quarantined' : (input.state ?? 'active'),
+        state: quarantine ? 'quarantined' : (input.state ?? 'active'),
       }
+      delete effectiveInput.ingest
       const res = ledger.append(effectiveInput)
-      return { inserted: res.inserted, id: res.id, decision: verdict.decision, reasons: verdict.reasons }
+      const reasons = trusted
+        ? verdict.reasons
+        : [...verdict.reasons, 'untrusted ingest: quarantined by default (B1)']
+      return { inserted: res.inserted, id: res.id, decision: quarantine ? 'quarantine' : verdict.decision, reasons }
     },
 
     /** 读取单条 */
@@ -302,6 +326,7 @@ export function createAcpService({ ledger, startupRebuild = true }) {
         scopeId: input.scopeId ?? 'user-global',
         agentKey: input.agentKey ?? '',
         sessionType: input.sessionType ?? 'root',
+        ingest: 'user-correction', // B1：可信来源，过闸门后落 active
       }
       const res = this.append(candidate)
       if (!res.inserted) return { inserted: false, newId: res.id, superseded: false, reasons: res.reasons ?? [] }

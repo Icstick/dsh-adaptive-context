@@ -17,5 +17,6 @@
 | adr/README.md | ADR 索引（0001-0003，只追加） |
 | DEVELOPMENT-PLAN.md | 开发计划与问题登记（backlog，含审查发现与解法） |
 | PLAN-S2-MIGRATION.md | S2 memento 迁移/退役专项计划 |
+| plans/ | 专项执行草案（如 acp-ingestion-hardening-2026-09-22.md：三条摄入口子的实测口径、候选修法、执行与回滚记录） |
 | design/ | 设计长文（架构/契约/编排/治理/沉淀/表达/多源 + benchmark 实测；自 acp-docs 并入） |
-| history/ | acp-docs 开发史保档（HANDOFF/里程碑计划/LESSONS/回顾，仅供追溯） |
+| history/ | 开发史与接续文档（HANDOFF-YYYY-MM-DD / 里程碑计划 / LESSONS / 回顾）。**最新接续：HANDOFF-2026-09-22.md（W→A/B 同步到 5027460）** |

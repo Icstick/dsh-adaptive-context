@@ -19,7 +19,7 @@ import { resolveDshHome } from './home.mjs'
 import {
   SCHEMA_VERSION, EVIDENCE_STATES, OBSERVATION_STATES, AUTHORITIES, SOURCE_CLASSES,
   CLAIM_DOMAINS, SENSITIVITIES, SCOPES, SESSION_TYPES,
-  MAX_OBSERVATION_TEXT_CHARS,
+  MAX_OBSERVATION_TEXT_CHARS, CANDIDATE_MEMORY_STATES,
   evidenceIdOf, hashHex,
 } from './constants.mjs'
 import { assertAuthorityConsistent } from './governance.mjs'
@@ -166,6 +166,43 @@ CREATE TABLE IF NOT EXISTS rule (
 );
 CREATE INDEX IF NOT EXISTS idx_rule_scope_state ON rule (scope_id, state);
 CREATE INDEX IF NOT EXISTS idx_rule_domain ON rule (scope_id, domain);
+
+-- v7（2026-09-22，Dreaming 第一增量）：candidate_memory —— 离线巩固的候选池。
+-- **物理分离**是硬要求：候选绝不直接变成 observation（「错误知识被自动晋升」的唯一硬防线，
+-- 见 docs/design/DREAMING.md §3）。状态机 candidate→observed→consensus→approved/rejected。
+CREATE TABLE IF NOT EXISTS candidate_memory (
+  id              TEXT PRIMARY KEY,           -- 由 (scope, clusterKey, memberIds) 派生 → 幂等重跑
+  scope_id        TEXT NOT NULL DEFAULT 'user-global',
+  state           TEXT NOT NULL DEFAULT 'candidate',
+  claim_domain    TEXT NOT NULL,
+  subject         TEXT NOT NULL,              -- 簇代表主体（成员中最常见者）
+  text            TEXT NOT NULL,              -- 簇代表正文（取成员原文，不新造语义）
+  observation_ids TEXT NOT NULL DEFAULT '[]', -- JSON：簇成员 observation id
+  evidence_ids    TEXT NOT NULL DEFAULT '[]', -- JSON：成员溯源证据并集（可回溯到 session/时间）
+  sessions        TEXT NOT NULL DEFAULT '[]', -- JSON：出现过的 session 集合（复现计数）
+  days            INTEGER NOT NULL DEFAULT 0, -- 出现的不同自然日数
+  occurrences     INTEGER NOT NULL DEFAULT 0,
+  first_seen      TEXT NOT NULL DEFAULT '',
+  last_seen       TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_memory_scope_state ON candidate_memory (scope_id, state);
+CREATE INDEX IF NOT EXISTS idx_candidate_memory_domain ON candidate_memory (claim_domain);
+
+-- v7：dream_run —— 每次离线跑批的台账（可审计、可解释：为什么这次没晋升）
+CREATE TABLE IF NOT EXISTS dream_run (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          INTEGER NOT NULL,
+  window_from TEXT,
+  window_to   TEXT,
+  scanned     INTEGER NOT NULL DEFAULT 0,
+  clustered   INTEGER NOT NULL DEFAULT 0,
+  promoted    INTEGER NOT NULL DEFAULT 0,
+  archived    INTEGER NOT NULL DEFAULT 0,
+  dry_run     INTEGER NOT NULL DEFAULT 0,
+  note        TEXT NOT NULL DEFAULT ''
+);
 `
 
 function assertChoice(value, allowed, label) {
@@ -584,6 +621,110 @@ export function openEvidenceLedger(opts = {}) {
     return collected.slice().sort((a, b) => createdAt.get(a) - createdAt.get(b))
   }
 
+  // ── Dreaming（v7，2026-09-22）：候选记忆池 ────────────────────────────────
+
+  function toCandidateMemory(r) {
+    return {
+      id: r.id, scopeId: r.scope_id, state: r.state, claimDomain: r.claim_domain,
+      subject: r.subject, text: r.text,
+      observationIds: JSON.parse(r.observation_ids || '[]'),
+      evidenceIds: JSON.parse(r.evidence_ids || '[]'),
+      sessions: JSON.parse(r.sessions || '[]'),
+      days: r.days, occurrences: r.occurrences,
+      firstSeen: r.first_seen, lastSeen: r.last_seen,
+      createdAt: r.created_at, updatedAt: r.updated_at,
+    }
+  }
+
+  /**
+   * 幂等写入候选记忆。
+   * **不覆盖人的决定**：库里已是 approved/rejected 时只更新统计字段，state 原样保留
+   * （否则每天重跑 dreaming 会把人工审批结果冲掉）。
+   * @param {object} input
+   * @returns {{inserted: boolean, id: string, startedState: string, row: object}}
+   */
+  function upsertCandidateMemory(input) {
+    const scopeId = input.scopeId ?? 'user-global'
+    const claimDomain = input.claimDomain
+    if (!claimDomain) throw new TypeError('candidateMemory.claimDomain required')
+    if (!input.id) throw new TypeError('candidateMemory.id required')
+    assertChoice(input.state ?? 'candidate', CANDIDATE_MEMORY_STATES, 'candidateMemory.state')
+
+    const existing = db.prepare('SELECT * FROM candidate_memory WHERE id = ?').get(input.id)
+    const now = Date.now()
+    if (existing) {
+      // 人工已裁决的状态不受重跑影响
+      const locked = existing.state === 'approved' || existing.state === 'rejected'
+      const nextState = locked ? existing.state : (input.state ?? existing.state)
+      db.prepare(`UPDATE candidate_memory SET
+        state = ?, subject = ?, text = ?, observation_ids = ?, evidence_ids = ?,
+        sessions = ?, days = ?, occurrences = ?, first_seen = ?, last_seen = ?, updated_at = ?
+        WHERE id = ?`).run(
+        nextState, input.subject ?? existing.subject, input.text ?? existing.text,
+        JSON.stringify(input.observationIds ?? JSON.parse(existing.observation_ids)),
+        JSON.stringify(input.evidenceIds ?? JSON.parse(existing.evidence_ids)),
+        JSON.stringify(input.sessions ?? JSON.parse(existing.sessions)),
+        input.days ?? existing.days, input.occurrences ?? existing.occurrences,
+        input.firstSeen ?? existing.first_seen, input.lastSeen ?? existing.last_seen,
+        now, input.id,
+      )
+      return { inserted: false, id: input.id, startedState: existing.state, row: getCandidateMemoryById(input.id) }
+    }
+    db.prepare(`INSERT INTO candidate_memory (
+      id, scope_id, state, claim_domain, subject, text, observation_ids, evidence_ids,
+      sessions, days, occurrences, first_seen, last_seen, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      input.id, scopeId, input.state ?? 'candidate', claimDomain,
+      input.subject ?? '', input.text ?? '',
+      JSON.stringify(input.observationIds ?? []), JSON.stringify(input.evidenceIds ?? []),
+      JSON.stringify(input.sessions ?? []), input.days ?? 0, input.occurrences ?? 0,
+      input.firstSeen ?? '', input.lastSeen ?? '', now, now,
+    )
+    return { inserted: true, id: input.id, startedState: input.state ?? 'candidate', row: getCandidateMemoryById(input.id) }
+  }
+
+  function getCandidateMemoryById(id) {
+    const r = db.prepare('SELECT * FROM candidate_memory WHERE id = ?').get(id)
+    return r ? toCandidateMemory(r) : null
+  }
+
+  /** 查询候选记忆（read-only） */
+  function queryCandidateMemory(q = {}) {
+    const conds = []
+    const params = []
+    if (q.scopeId) { conds.push('scope_id = ?'); params.push(q.scopeId) }
+    if (q.state) { conds.push('state = ?'); params.push(q.state) }
+    if (q.claimDomain) { conds.push('claim_domain = ?'); params.push(q.claimDomain) }
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
+    const limit = Math.min(q.limit ?? 50, 500)
+    const rows = db.prepare('SELECT * FROM candidate_memory ' + where
+      + ' ORDER BY occurrences DESC, last_seen DESC, id ASC LIMIT ?').all(...params, limit)
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM candidate_memory ${where}`).get(...params).c
+    return { items: rows.map(toCandidateMemory), total }
+  }
+
+  /** 记一次 dreaming 跑批（台账，供审计与「为什么这次没晋升」的解释） */
+  function recordDreamRun(input = {}) {
+    const info = db.prepare(`INSERT INTO dream_run
+      (ts, window_from, window_to, scanned, clustered, promoted, archived, dry_run, note)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      input.ts ?? Date.now(), input.windowFrom ?? null, input.windowTo ?? null,
+      input.scanned ?? 0, input.clustered ?? 0, input.promoted ?? 0, input.archived ?? 0,
+      input.dryRun ? 1 : 0, input.note ?? '',
+    )
+    return Number(info.lastInsertRowid)
+  }
+
+  function listDreamRuns(limit = 20) {
+    return db.prepare('SELECT * FROM dream_run ORDER BY ts DESC, id DESC LIMIT ?')
+      .all(Math.min(limit, 200))
+      .map((r) => ({
+        id: r.id, ts: r.ts, windowFrom: r.window_from, windowTo: r.window_to,
+        scanned: r.scanned, clustered: r.clustered, promoted: r.promoted,
+        archived: r.archived, dryRun: r.dry_run === 1, note: r.note,
+      }))
+  }
+
   let closed = false
   function close() {
     if (closed) return // 幂等：重复 close 是 no-op
@@ -597,6 +738,7 @@ export function openEvidenceLedger(opts = {}) {
     getMeta, setMeta,
     upsertObservation, getObservationById, queryObservation, listObservations, getObservationLineage,
     candidateStore, auditStore, ruleStore,
+    upsertCandidateMemory, getCandidateMemoryById, queryCandidateMemory, recordDreamRun, listDreamRuns,
     close,
   }
 }

@@ -14,8 +14,18 @@
 import { hashHex } from './constants.mjs'
 import { agentAuthoredAuthority } from './governance.mjs'
 
-/** 可摄入的 DSH session event 类型前缀/名称 */
-const WORTHY_PREFIXES = ['user/', 'assistant/', 'tool/', 'turn/', 'agent/inbox/spliced']
+/**
+ * 可摄入的 DSH session event 类型前缀/名称（兜底白名单）。
+ *
+ * A1（2026-09-22）：**移除 assistant/**。模型输出不是证据——此前经 agent/inbox/spliced
+ * 且 kind=assistant 的已被 7f12557 挡住，但以 assistant/message 事件形态到来的模型自述
+ * 走的正是这条兜底分支，照单全收。W 机实测：7f12557 落地之后新入账的证据里仍有 85.6%
+ * 是 agent 自产（169+4 条 vs 用户 27+2 条），主会话内 agent 自产占比 88.2%。
+ * 账本 append-only（ADR-0001），误入的噪声删不掉 → 取 fail-closed；漏掉的真内容在会话日志里
+ * 仍有原文，可由 turn/end consolidation 事后补捞（与 7f12557 同一取舍）。
+ * tool/ 暂留：它对应 external_information「工具输出补充工作经验」的设计意图，是否收掉单独论证。
+ */
+const WORTHY_PREFIXES = ['user/', 'tool/', 'turn/', 'agent/inbox/spliced']
 
 /**
  * agent/inbox/spliced 的**可摄入** source.kind 白名单（fail-closed）。
@@ -116,6 +126,24 @@ export function isEvidenceWorthy(event) {
  */
 export function isSystemInjected(text) {
   return typeof text === 'string' && text.includes('<system-reminder>')
+}
+
+/**
+ * 会话类型派生（C，2026-09-22）。
+ *
+ * 依据：DSH session header 的 origin 唯一取值为 "subagent"
+ * （deepseek-harness docs/persistence-catalog.md 的 session header 节；UI 侧 fork 子会话同样带
+ * origin: "subagent"，见 packages/client/ui-workspace/tests/tree.client.spec.ts）。
+ *
+ * 修的是什么：index.mjs 原先读的是**事件**上的 sessionType——事件没有这个字段，于是账本里
+ * session_type 恒为 root（W 机实测 2400/2400、subagent 零条），按会话类型做读侧隔离无从下手。
+ * SESSION_TYPES 里的 fork 在这条链路上不可达（header 表达不了），保留枚举不动。
+ *
+ * @param {object} session - DSH session（含 header）
+ * @returns {'root'|'subagent'}
+ */
+export function sessionTypeOf(session) {
+  return session?.header?.origin === 'subagent' ? 'subagent' : 'root'
 }
 
 /**
