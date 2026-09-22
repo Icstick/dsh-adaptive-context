@@ -30,7 +30,7 @@
 | `consolidate.mjs` | 在线小批 evidence → observation | **不改它的触发与批次**；dreaming 在它之后跑 |
 | `candidate.mjs` / `expression.mjs` | style 候选 → 审批 → 物化视图 | **复用机制（`approval.request`），不共用表** |
 | `dsh-work-continuity` | WorkState | **明确不碰**——五条不可变原则之一：Memory does not own work continuity |
-| `dsh-weaver` | 结构化知识库 | **不写 weaver**：跨插件写共享 SQLite 有并发与归属风险（已有先例结论） |
+| `dsh-weaver` | 结构化知识库 | **画像域永不入 weaver**；只有 `work` / `external_fact` 两域可走人工审的单向通道（见 §10）。**理由已修正**：不是「weaver 没写入 API」（那条先例已过期），是语义分域 |
 | `dsh-context-maid` | 压缩 + 先归档后压缩 | 不碰；它的归档走 `acp.append`，已受 B1 闸门约束 |
 
 ## 3. 四单元（对齐 wv-20260901-001，不另起炉灶）
@@ -141,7 +141,7 @@ CREATE TABLE dream_run (
 - **不自动晋升到 observation**（一期）：`approved` 之后由人决定，或走现有 style 那套 approval 门。
 - **不做跨 Profile / 跨机共享**（等 P3 与账本统一决定）。
 - **不引运行时依赖**：AGENTS.md 铁律 6；语义归并（P2）也必须走 Provider 插槽而不是内嵌模型。
-- **不写 weaver**：跨插件写共享库有归属风险，只读。
+- **不把画像域写进 weaver**：`user_preference` / `user_fact` / `style` 恒不出 ACP。可导出的只有 `work` / `external_fact`，且必须人工审（§10）。
 
 ## 9. 第一步落地清单（待批准后实施）
 
@@ -152,3 +152,48 @@ CREATE TABLE dream_run (
 5. `scripts/ledger-audit.mjs` 增加一节：候选池与冷存统计
 
 **语义归并（embedding）留到 P2**，走 Provider 插槽，不在本增量里。
+
+## 10. 与 weaver 的通道（2026-09-22 评估结论）
+
+> 来源：子代理只读评估（同一轮完成）。**它推翻了一条本文档先前复述的先例**，故单列。
+
+### 10.1 先例订正：「weaver 未提供写入 API」已过期
+
+- 该说法出自 `dsh-knowledge-recall/src/index.mjs:56-57` 与 `docs/research/PEER-SURVEY-20260909.md:122`，写于 2026-09-09/09-10。
+- **工具面早就有写入口**：`D:/DSH_workspace/.tooling/lib/wv.mjs` 的 `putOne()`（:348）被 `put`（:396）与 `import`（:420）调用；子命令表含 `put / import / patch / rm`。带当日 VACUUM INTO 备份、`BEGIN IMMEDIATE`、经 `meta.db.id_sequence` 原子取号、以及 `notePending()` 触发跨机推送。
+- 换句话说：**插件面没有写 API，工具面有**。把两者混为一谈，会把一个已解决的问题当成阻塞项。
+- 归属风险那一半**仍然成立**（weaver 是三机共享库，ACP 账本是每机本地 SQLite）——但它是**语义**问题，不是并发问题。
+
+### 10.2 真正的风险是语义，不是 SQLite 并发
+
+实测（W 机）：`observation` 46 条 active 的域分布 —— `user_preference 22 / work 16 / external_fact 4 / user_fact 3 / style 1`。
+**画像域占多数**，写进「整理好的知识卡片」定位的 weaver 会：
+1. 与 3,961 条真知识争同一批命中位（非 verbatim 8 库中 85.9% 的条目 `access_count = 0`，再灌短画像只会推高死重）；
+2. 在召回注入面造成**同一内容二次注入**——weaver 那路是 `[knowledge-recall]` 行、无 authority/claimDomain/supersede 语义，ACP 那路带完整标签，两条共享 900 tokens/step 预算；
+3. 回音室：observation 来自用户自己的话，recall 查询词也来自用户消息 → 画像条目会系统性高命中当轮提问。
+
+### 10.3 采纳方案：分域白名单的单向通道
+
+**默认拒绝**，判据（纯确定性，可单测）：
+
+```
+claimDomain ∈ { work, external_fact }        // 画像三域永不出 ACP
+  AND authority ∈ { user_correction, user_explicit }
+  AND durability = permanent
+  AND 至少 1 条 evidence 回链
+```
+
+流向：ACP 导出候选 JSONL（形态可复用 `src/export-import.mjs` 的 observation 流）→ **人工审** → `wv import` 写入。
+**weaver 侧零改动**，ACP 侧只加一个导出器 + 一组判据 + 单测（铁律 4）。
+
+验收：`wv check` 无新问题；这批条目两周后 `access_count > 0` 的比例应显著高于当前均值（14.1%）；召回 golden 无回退。
+
+量级：实测蒸馏 **13.2 条 observation/天**（本文档早先按 2–3 条/天估算是错的，低约 5 倍）。
+限制到两域后上界约 **6.7 条/天 ≈ 2,400 条/年**。
+
+### 10.4 附带发现：weaver 库不是 WAL
+
+W 机实测 11 个库（8 个知识库 + meta + verbatim + weaver）**`journal_mode` 全部是 `delete`（回滚日志），db 目录 0 个 `-wal` 文件**。
+这与 weaver 条目 `workflow/wv-20260911-12481` 记载的「全库转 WAL 后连续写入 2.4 万条」**不符**。
+回滚模式下写者提交期独占锁、读者会挡住写者，读写并发弱于 WAL。
+→ 归属 weaver 侧核查（A/B 机状态本轮未取到），**不建议在核查前让 ACP 直写**。
