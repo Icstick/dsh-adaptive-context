@@ -47,6 +47,7 @@ export function parseArgs(argv) {
     inFile: a.in || '',
     from: a.from || '(unknown)',
     apply: a.apply === '1' || a.apply === 'true',
+    release: a.release || '',
     domains: a['include-experience'] === '1'
       ? null
       : (a.domains ? a.domains.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_DOMAINS),
@@ -85,8 +86,29 @@ export function planImport(lines, keys, domains) {
   return { keep, stats }
 }
 
+/** 放行：把 manifest 里记的 id 由 quarantined 翻回 active（唯一的「生效」入口） */
+function release(ledger, manifestFile, apply) {
+  const m = JSON.parse(readFileSync(manifestFile, 'utf8'))
+  const ids = Array.isArray(m.ids) ? m.ids : []
+  const rows = ids.map((id) => ledger.db.prepare('SELECT id, state FROM observation WHERE id = ?').get(id)).filter(Boolean)
+  const pending = rows.filter((r) => r.state === 'quarantined')
+  const out = { mode: apply ? 'APPLY' : 'DRY-RUN', action: 'release', manifest: manifestFile, from: m.from ?? '(unknown)', found: rows.length, toRelease: pending.length, notQuarantined: rows.length - pending.length }
+  if (apply) {
+    const stmt = ledger.db.prepare("UPDATE observation SET state = 'active' WHERE id = ? AND state = 'quarantined'")
+    let n = 0
+    for (const r of pending) n += Number(stmt.run(r.id).changes)
+    out.released = n
+  }
+  console.log(JSON.stringify(out, null, 1))
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2))
+  if (opts.release) {
+    const ledger = openEvidenceLedger({ dir: opts.dir })
+    try { release(ledger, opts.release, opts.apply) } finally { ledger.close?.() }
+    return
+  }
   if (!opts.inFile) {
     console.error('用法: node scripts/ledger-import.mjs --in <file.jsonl> [--from W] [--apply]')
     process.exit(2)

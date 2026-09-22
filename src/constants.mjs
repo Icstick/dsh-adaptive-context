@@ -23,6 +23,12 @@ export const EVIDENCE_STATES = Object.freeze([
 export const OBSERVATION_STATES = Object.freeze([
   'active',      // 当前生效版本
   'superseded',  // 被同键新 Observation 替代（不物理删除）
+  // 2026-09-22（P1-4.1 S2）：**跨机导入的暂存态**。
+  //   - 读侧只取 state='active'（store.listObservations / readActive），所以 quarantined
+  //     天然不注入 —— 导入这个动作不需要「回滚」就能撤销效果；
+  //   - 放行 = 翻回 active：scripts/ledger-import.mjs --release <manifest> --apply；
+  //   - 与 evidence 的 quarantined 同义：记录但不可注入。
+  'quarantined',
 ])
 
 /** Observation 正文（浓缩认知）上限（字符）；原始大内容留在 Evidence（8000） */

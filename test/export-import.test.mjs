@@ -275,3 +275,39 @@ test('枚举/结构校验：非法 authority / 缺 confidence / 非法 domain �
   assert.equal(dst.stats().total, 0)
   assert.equal(dst.candidateStore.listCandidates().length, 0)
 })
+
+// ===================== P1-4.1 S2：跨机导入暂存态 =====================
+
+test('observation 可落 quarantined：导入成功、不进 active 读侧、放行后可见', (t) => {
+  const dst = freshLedger(t)
+  const line = JSON.stringify({
+    kind: 'observation',
+    version: EXPORT_VERSION,
+    ts: 1,
+    data: {
+      id: 'obs_cross_1',
+      scopeId: 'user-global',
+      subject: 'pkg',
+      predicate: 'uses',
+      claimDomain: 'work',
+      authority: 'user_explicit',
+      text: 'pnpm',
+      evidenceIds: [],
+      supersedes: [],
+      state: 'quarantined',
+      observedAt: '2026-09-22T00:00:00.000Z',
+      createdAt: 1,
+    },
+  })
+  const r = importJsonl(line + '\n', { ledger: dst, candidateStore: dst.candidateStore, auditStore: dst.auditStore })
+  assert.equal(r.inserted, 1)
+  assert.equal(r.errors.length, 0)
+  const row = dst.getObservationById('obs_cross_1')
+  assert.equal(row.state, 'quarantined')
+  // active 读侧（注入/快照的唯一入口）看不到它
+  assert.equal(dst.listObservations().length, 0)
+  // 放行 = 翻回 active
+  dst.db.prepare("UPDATE observation SET state = 'active' WHERE id = ?").run('obs_cross_1')
+  assert.equal(dst.listObservations().length, 1)
+  assert.equal(dst.getObservationById('obs_cross_1').state, 'active')
+})
