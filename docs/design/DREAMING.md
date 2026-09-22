@@ -274,17 +274,20 @@ P2 只是把 dream-export 的输出目标从「本地 JSONL 交给人」换成�
 
 - ~~**云端与 A/B 机本轮不可达**~~ → **当晚已通**（2026-09-22 21:2x 起，云端仍走既有 ZeroTier/ssh 通道，ACP 同步已在用它当中转信箱）。下面两项已取到：
   - **`wv-merge.mjs` 已读**（259 行，云端 `/mnt/datadisk/weaver/tools/wv-merge.mjs`）。协议要点：inbound 文件 = **首行 manifest + N 行 entry JSONL**；每条按 `(lib, id)` 走四分支（insert / `masterHash === baseHash` 快进替换 / `masterHash === contentHash` noop / 否则**冲突**）；hash 必须与 `weaver-hash.mjs` **同一实现**，否则每条都判冲突（正是 wv-sync.ps1:117-135 那个坑）；`LIBS` 是 9 库白名单，**非 LIBS 的库根本不进这条管线**——这正好印证 §11.2①「staging 不要做成 weaver 库」是对的：它必须走**另一条**接纳管线，而不是 wv-merge。
-  - **云端 LLM 通道：未确认**（交互式 `env` 里无任何 provider key；不排除 systemd unit / 配置文件里有，未查）。
-- **精馏那步用不用 LLM 没定**：若不用，纯确定性判据（11.3）够不够，需要拿真实 staging 数据试。若用，云端的 LLM 通道**未确认**（云端有门户站，但没查过它有没有模型通道）。
+  - **云端 LLM 通道：已确认存在（2026-09-22 21:4x）**。不是直连 API key（`/etc/environment`、`profile.d`、交互式 `env` 全无 provider key），而是**一池正在跑的 worker**：`dsh-dispatcher.service`（`/opt/dsh-dispatcher/server.mjs`，127.0.0.1:8456 任务队列）+ `dsh-worker-v2{,b,c,d}.service`（`/opt/dsh-worker/worker-v2.mjs`，实际跑 `pnpm dsh --profile headless <prompt>`）→ **模型凭据在 worker 的 headless profile 里**。先例：`workflow/wv-20260911-12487《云矿流水线》` 用同一套池做过 18 仓库深挖。约束：worker 沙箱 workspace-write（**产出必须落工作区内**）、编排用 `setsid nohup` 跑在云端不依赖发起方、**先试点再全量**。
+- **精馏那步用不用 LLM 没定**（通道问题已解决，剩下的是**要不要**用）：若不用，纯确定性判据（11.3）够不够，需要拿真实 staging 数据试。**现可试**：A 机已有 1518 条候选（见 §13），其中复现 ≥ 2 的 67 条就是首批真实样本。
 - **云端 wv-merge.mjs 的协议只见过调用点**（wv-sync.ps1:286），没读过实现。要接进去必须先读懂它，否则会撞上 wv-sync.ps1:117-135 那条「协议实现不一致 → 静默把每条都判成冲突」的坑。
 
 ### 11.7 结论
 
 **采纳为 P2 目标形态。** 三个动作按依赖排序：
 
-1. ~~本地 P1 闭环~~（已完成：src/dream.mjs + candidate_memory + dream-review + dream-export）
-2. **等链路恢复**：读 wv-merge.mjs、确认云端 LLM 通道、在云端建 staging.db
+1. ~~本地 P1 闭环~~（已完成：src/dream.mjs + candidate_memory + dream-review + dream-export；**A 机也已实测落库**，见 §13）
+2. ~~等链路恢复~~ → **链路已通**：wv-merge.mjs 已读、云端 LLM 通道已确认（worker 池）、**剩「在云端建 staging.db」**
 3. **改 dream-export 的输出目标**为云端 inbound（复用 wv-sync 的 slot 形态）
+
+> ⚠️ **顺序修正（2026-09-22 21:43 拍板）**：妹妹澄清「weaver 蒸馏」的本意是**蒸馏 weaver 存量**，而不是只做这条 ACP→weaver 的通道。**先做存量蒸馏（B），再做通道（A）**——理由与实测见 `docs/plans/weaver-distillation-framing-20260922.md`（weaver 8 库 3960 条里 **85.5% 零访问**、单条最长 4.9 万字）。
+> 该篇同时把外部判据接了进来（同日 7 视频研究给出的**四线证据 / 摩擦信号 / 置信度新陈代谢**）。
 
 **P1 不做废**：它现在是 P2 的上游，人工门退为兜底。
 
