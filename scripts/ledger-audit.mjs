@@ -33,7 +33,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from '../src/home.mjs'
 import { DEFAULT_DB_NAME } from '../src/constants.mjs'
-import { isConsolidationSkippable } from '../src/consolidate.mjs'
+import { isConsolidationSkippable, isAckOnlySkippable } from '../src/consolidate.mjs'
 import { sectionOf } from '../src/composer.mjs'
 import { authorityMayClaimDomain } from '../src/governance.mjs'
 import { estimateTokens, LINE_LABEL_TOKENS } from '../src/budget.mjs'
@@ -112,10 +112,13 @@ export function auditLedger(db, opts) {
   // ---------- 蒸馏 ----------
   const watermark = one("SELECT value v FROM acp_meta WHERE key='consolidation_watermark_ts'")?.v ?? ''
   const activeRows = all("SELECT * FROM evidence WHERE state='active'").map(ev)
+  // 两道源头过滤：agent 自产 experience（P0）+ 纯应答短句（2026-09-22）
   const skippable = activeRows.filter((e) => isConsolidationSkippable(e))
+  const ackSkipped = activeRows.filter((e) => !isConsolidationSkippable(e) && isAckOnlySkippable(e))
   const queue = activeRows
     .filter((e) => (watermark ? String(e.observedAt ?? '') > watermark : true))
     .filter((e) => !isConsolidationSkippable(e))
+    .filter((e) => !isAckOnlySkippable(e))
   const queueByCat = {}
   for (const e of queue) {
     const k = e.authority + ' / ' + e.claimDomain
@@ -127,6 +130,8 @@ export function auditLedger(db, opts) {
     queueByCat: Object.entries(queueByCat).map(([k, n]) => ({ k, n })).sort((a, b) => b.n - a.n),
     skippedTotal: skippable.length,
     skippedRatio: activeRows.length ? skippable.length / activeRows.length : 0,
+    ackSkippedTotal: ackSkipped.length,
+    ackSkippedRatio: activeRows.length ? ackSkipped.length / activeRows.length : 0,
     recentRuns: all("SELECT datetime(ts/1000,'unixepoch') t, reason, payload FROM audit"
       + " WHERE op='consolidate' ORDER BY ts DESC LIMIT ?", Math.max(top, 5)),
   }
@@ -233,6 +238,7 @@ export function render(rep) {
   L.push('  队列（未消化，已过 skip 过滤）: ' + rep.distill.queue + ' 条'
     + (rep.distill.queueByCat.length ? '  [' + rep.distill.queueByCat.map((q) => q.k + ' ' + q.n).join(' · ') + ']' : ''))
   L.push('  永久跳过（agent_authored + experience）: ' + rep.distill.skippedTotal + ' 条 = ' + pct(rep.distill.skippedRatio))
+  L.push('  永久跳过（纯应答短消息）: ' + rep.distill.ackSkippedTotal + ' 条 = ' + pct(rep.distill.ackSkippedRatio))
   L.push('  近 ' + rep.distill.recentRuns.length + ' 次 run:')
   for (const r of rep.distill.recentRuns) {
     let pl = {}

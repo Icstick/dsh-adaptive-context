@@ -106,6 +106,15 @@ export const CONSOLIDATION_MAX_RUNS_PER_DAY = 24
  *  清完 2791 条需 ~29 天（实际受 turn/end 触发限制更慢）。过滤后 pending 降到 ~209 条。
  *  语义：仍在账本内（append-only 不删），只是不参与蒸馏。 */
 export const CONSOLIDATION_SKIP_AGENT_EXPERIENCE = true
+/** 纯应答短消息（「继续」「重启好了」）不进蒸馏队列（2026-09-22）。
+ *  背景：A1 收掉模型自产之后，蒸馏队列里只剩用户消息，而其中一大半是零信息的
+ *  续跑/确认。送进 LLM 只会产出「用户 确认」类垃圾 observation（weaver wv-20260911-151
+ *  记的 47% 丢弃率就是这批）。仍在账本内（append-only 不删），只是不参与蒸馏。
+ *  判据见 consolidate.mjs 的 isAckText：**保守**，只认剥离应答词后剩不下实义字符的短句——
+ *  「可以push」「B+C吧」「行，那就2吧」这类必须留住。 */
+export const CONSOLIDATION_SKIP_ACK_ONLY = true
+/** 纯应答判定的长度上限（归一化后字符数）；超长一律不判应答 */
+export const ACK_ONLY_MAX_CHARS = 20
 /** 失败留痕与日频计数（P0-1/P0-4） */
 export const CONSOLIDATION_META_FAIL_COUNT = 'consolidation_fail_count'
 export const CONSOLIDATION_META_LAST_FAILURE = 'consolidation_last_failure'

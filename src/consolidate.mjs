@@ -22,6 +22,8 @@ import {
   CONSOLIDATION_META_RUN_DAY,
   CONSOLIDATION_META_RUN_COUNT,
   CONSOLIDATION_SKIP_AGENT_EXPERIENCE,
+  CONSOLIDATION_SKIP_ACK_ONLY,
+  ACK_ONLY_MAX_CHARS,
   MAX_OBSERVATION_SUBJECT_CHARS,
   MAX_OBSERVATION_TEXT_CHARS,
 } from './constants.mjs'
@@ -41,6 +43,52 @@ import { isActionFlowObservation } from './governance.mjs'
 export function isConsolidationSkippable(ev, skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE) {
   if (!skipAgentExperience) return false
   return ev?.sourceClass === 'agent_authored' && ev?.claimDomain === 'experience'
+}
+
+// ===================== 纯应答过滤（2026-09-22） =====================
+
+/**
+ * 应答词（剥离后剩不下实义字符 → 纯应答）。
+ * **保守取向**：只收明确的寒暄/续跑/确认词；不收数字、拉丁字母、任何实义名词——
+ * 「可以push」「B+C吧」「行，那就2吧」「1.2.3.按顺序来吧」剥离后都还剩实义字符，必须留住。
+ */
+export const ACK_FILLERS = Object.freeze([
+  '继续', '接着', '重启', '重试', '再试', '再尝试', '尝试', '试试', '测试',
+  '可以', '不用', '不必', '好的', '好', '行', '嗯', '啊', '哦', '啦', '呗',
+  '的', '了', '吧', '呢', '吗', '呀', '嘛',
+  '再', '一次', '一下', '下', '次',
+  '我们', '我', '你', '先', '就', '都', '把', '那', '这', '样',
+  '完', '搞定', '完成', '结束', '开始', '推进', '来', '已经',
+])
+
+/**
+ * 文本是否为「纯应答」（零信息）。
+ * 判据两步：① 归一化后长度 <= ACK_ONLY_MAX_CHARS；② 剥掉 ACK_FILLERS 与全部空白/标点后为空。
+ * 纯函数，可测。
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isAckText(text, maxChars = ACK_ONLY_MAX_CHARS) {
+  const raw = String(text ?? '').trim()
+  if (!raw) return true
+  if (raw.length > maxChars) return false
+  let rest = raw
+  for (const f of ACK_FILLERS) rest = rest.split(f).join('')
+  rest = rest.replace(/[\s\p{P}\p{S}]/gu, '')
+  return rest.length === 0
+}
+
+/**
+ * 该条证据是否因「纯应答」而跳过蒸馏。
+ * 只作用于 user_input——纠正（user_correction）按定义有信息，不参与判定。
+ * @param {object} ev - evidence 行（camelCase）
+ * @param {boolean} [skipAckOnly] - false = 关闭过滤（测试/回溯用）
+ * @returns {boolean}
+ */
+export function isAckOnlySkippable(ev, skipAckOnly = CONSOLIDATION_SKIP_ACK_ONLY) {
+  if (!skipAckOnly) return false
+  if (ev?.sourceClass !== 'user_input') return false
+  return isAckText(ev?.content)
 }
 
 // ===================== 规则兜底（LLM 不可用） =====================
@@ -311,6 +359,8 @@ export function createConsolidator(opts = {}) {
     maxRunsPerDay = CONSOLIDATION_MAX_RUNS_PER_DAY,
     // P0 源头过滤（2026-09-09）：agent 自产 experience 动作流水不进队列
     skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE,
+    // 2026-09-22：纯应答短消息（「继续」「重启好了」）不进队列
+    skipAckOnly = CONSOLIDATION_SKIP_ACK_ONLY,
     logger = console,
     // M3 B3：guarded auto promotion 依赖（index.mjs 装配；缺省 null = M2 行为）
     candidateStore = null,
@@ -337,8 +387,9 @@ export function createConsolidator(opts = {}) {
     return Number.isFinite(n) ? n : 0
   }
 
-  /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续）；
-   *  P0 源头过滤（2026-09-09）：agent 自产 experience 动作流水在进入队列前剔除。 */
+  /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续）。
+   *  源头过滤两道：P0（2026-09-09）agent 自产 experience 动作流水；
+   *  纯应答（2026-09-22）零信息的续跑/确认短句。都在进入队列前剔除。 */
   function undigestedEvidence() {
     const watermark = readMeta(CONSOLIDATION_META_WATERMARK_TS)
     const active = typeof ledger.listActive === 'function'
@@ -349,6 +400,7 @@ export function createConsolidator(opts = {}) {
       : [...active]
     return pendingRows
       .filter((ev) => !isConsolidationSkippable(ev, skipAgentExperience))
+      .filter((ev) => !isAckOnlySkippable(ev, skipAckOnly))
       .sort((a, b) => String(a.observedAt ?? '').localeCompare(String(b.observedAt ?? '')))
   }
 
