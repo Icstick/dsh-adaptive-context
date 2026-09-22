@@ -36,6 +36,7 @@ import { DEFAULT_DB_NAME } from '../src/constants.mjs'
 import { isConsolidationSkippable, isAckOnlySkippable } from '../src/consolidate.mjs'
 import { planArchival } from '../src/dream.mjs'
 import { sectionOf } from '../src/composer.mjs'
+import { buildProfile, profileRefs, isProfileDomain } from '../src/profile.mjs'
 import { authorityMayClaimDomain } from '../src/governance.mjs'
 import { estimateTokens, LINE_LABEL_TOKENS } from '../src/budget.mjs'
 
@@ -84,6 +85,8 @@ const ev = (r) => ({
 export function auditLedger(db, opts) {
   const one = (sql, ...p) => db.prepare(sql).get(...p)
   const all = (sql, ...p) => db.prepare(sql).all(...p)
+  // 候选池表是 schema v7 才有的；旧库（< 7）不存在。hoist 到最前——画像段与 dreaming 段都要用。
+  const hasCandidatePool = Boolean(one("SELECT 1 x FROM sqlite_master WHERE type='table' AND name='candidate_memory'"))
   const { quota, recall, top } = opts
 
   // ---------- 规模 ----------
@@ -191,6 +194,52 @@ export function auditLedger(db, opts) {
     })).sort((a, b) => b.tokens - a.tokens),
   }
 
+  // ---------- 画像段（Profile 口径，2026-09-22 A0 之后） ----------
+  // 为什么要单独一节：A0 之后 user_model 段的真值来源是 Profile（由 observation 构建），
+  // **不再是 evidence**。上面 [注入分档] 走的是 evidence 口径，不能代表画像段——
+  // 它会把「已被 A0 滤出画像的原始消息」也算进去，从而高估。
+  const support = new Map()
+  if (hasCandidatePool) {
+    for (const c of all('SELECT observation_ids, days, sessions, state FROM candidate_memory')) {
+      const sessN = JSON.parse(c.sessions || '[]').length
+      for (const oid of JSON.parse(c.observation_ids || '[]')) {
+        const p = support.get(oid)
+        support.set(oid, {
+          days: Math.max(p?.days ?? 0, c.days ?? 0),
+          sessions: Math.max(p?.sessions ?? 0, sessN),
+          confirmed: Boolean(p?.confirmed) || c.state === 'approved',
+        })
+      }
+    }
+  }
+  const profileSource = all("SELECT id, subject, predicate, claim_domain, text, authority, evidence_ids, observed_at, created_at"
+    + " FROM observation WHERE state='active'")
+    .map((r) => ({
+      id: r.id, subject: r.subject, predicate: r.predicate, claimDomain: r.claim_domain,
+      text: r.text, authority: r.authority, evidenceIds: JSON.parse(r.evidence_ids || '[]'),
+      observedAt: r.observed_at, createdAt: r.created_at,
+    }))
+  const profileObj = buildProfile(profileSource.filter((o) => isProfileDomain(o.claimDomain)), { support })
+  const profileRows = profileRefs(profileObj)
+  const weights = profileRows.map((r) => r.weight)
+  const profile = {
+    activeObservations: profileSource.length,
+    inProfile: profileRows.length,
+    stableFacts: profileObj.stableFacts.length,
+    preferences: profileObj.preferences.length,
+    sourceVersion: profileObj.sourceVersion,
+    supportMatched: profileRows.filter((r) => support.has(r.observationId)).length,
+    weight: weights.length
+      ? {
+        min: Math.min(...weights),
+        max: Math.max(...weights),
+        avg: Math.round((weights.reduce((s, x) => s + x, 0) / weights.length) * 1000) / 1000,
+      }
+      : null,
+    top: profileRows.slice().sort((a, b) => b.weight - a.weight).slice(0, 5)
+      .map((r) => ({ id: r.observationId, weight: r.weight, signals: r.signals, subject: r.subject })),
+  }
+
   // ---------- observation ----------
   const observation = {
     byState: all('SELECT state, COUNT(*) n FROM observation GROUP BY state ORDER BY n DESC'),
@@ -200,8 +249,7 @@ export function auditLedger(db, opts) {
   }
 
   // ---------- Dreaming 候选池 + 冷存（§9 第 5 步，2026-09-22） ----------
-  // 候选池表是 schema v7 才有的；旧库（< 7）不存在，如实报「无」而不是崩。
-  const hasCandidatePool = Boolean(one("SELECT 1 x FROM sqlite_master WHERE type='table' AND name='candidate_memory'"))
+  // （hasCandidatePool 已在函数开头 hoist：画像段与本节都要用）
   const dream = hasCandidatePool
     ? {
       hasPool: true,
@@ -236,6 +284,7 @@ export function auditLedger(db, opts) {
     },
     injection,
     observation,
+    profile,
   }
 }
 
@@ -278,11 +327,25 @@ export function render(rep) {
   for (const [k, n] of Object.entries(rep.window.composition)) L.push('     ' + k + '  ' + n)
   L.push('')
   L.push('[注入分档] 池 ' + rep.injection.pool + ' -> 过读矩阵 ' + rep.injection.eligible + ' -> 内容去重后 ' + rep.injection.afterContentDedup)
+  L.push('  ⚠ 近似口径：此处走 evidence 窗口，**不含跨会话闸门与 section 预算裁剪**，会高估；')
+  L.push('    且 A0 之后 user_model 段真值来自 Profile（见下节），本节的 user_model 行不代表实际注入。')
   for (const s of rep.injection.sections) {
     L.push('  ' + String(s.section).padEnd(11) + s.n + ' 条  ' + s.tokens + ' tok / ' + s.quota
       + '  (' + (s.fill ?? 0) + '%)' + (s.oversize ? '  整条丢 ' + s.oversize : '') + (s.truncated ? '  截断 ' + s.truncated : ''))
     for (const b of s.biggest) {
       L.push('       ' + String(b.tokens).padStart(5) + ' tok  ' + b.authority + '/' + b.domain + '  ' + b.preview.replace(/\n/g, ' '))
+    }
+  }
+  L.push('')
+  L.push('[画像段] Profile（A0 之后 user_model 段的真值来源）')
+  L.push('  active observation ' + rep.profile.activeObservations + ' 条 → 进画像 ' + rep.profile.inProfile
+    + '  (stableFacts ' + rep.profile.stableFacts + ' · preferences ' + rep.profile.preferences + ')')
+  L.push('  源版本 ' + rep.profile.sourceVersion + ' · 命中复现/批准信号 ' + rep.profile.supportMatched + ' 条')
+  if (rep.profile.weight) {
+    L.push('  权重 min ' + rep.profile.weight.min + ' · avg ' + rep.profile.weight.avg + ' · max ' + rep.profile.weight.max)
+    for (const t of rep.profile.top) {
+      L.push('     ' + String(t.weight).padEnd(5) + ' ev' + t.signals.evidenceCount
+        + ' 日' + t.signals.days + (t.signals.confirmed ? ' 已批准' : '') + '  ' + t.subject + '  ' + t.id)
     }
   }
   L.push('')

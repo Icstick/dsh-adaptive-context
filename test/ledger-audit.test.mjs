@@ -93,7 +93,7 @@ test('render：产出人可读摘要且含关键段', () => {
   const { ledger } = makeLedger()
   seed(ledger)
   const text = render(auditLedger(ledger.db, parseArgs([])))
-  for (const head of ['=== ACP 账本体检（只读） ===', '[规模]', '[摄入面]', '[蒸馏]', '[召回窗]', '[注入分档]', '[observation]', '[候选池]', '[冷存清单]']) {
+  for (const head of ['=== ACP 账本体检（只读） ===', '[规模]', '[摄入面]', '[蒸馏]', '[召回窗]', '[注入分档]', '[画像段]', '[observation]', '[候选池]', '[冷存清单]']) {
     assert.ok(text.includes(head), '缺少段落 ' + head)
   }
   assert.ok(text.includes('background skill reviewer'))
@@ -123,6 +123,24 @@ test('候选池一节：旧库（无 candidate_memory）如实报「无」而不
   const rep = auditLedger(ledger.db, parseArgs([]))
   assert.equal(rep.dream.hasPool, false)
   assert.ok(render(rep).includes('没有 candidate_memory'))
+})
+
+test('画像段一节：Profile 口径（A0 之后 user_model 的真值来源），与 evidence 口径分开报', (t) => {
+  const { ledger } = makeLedger()
+  t.after(() => ledger.close())
+  // 画像域 observation 两条 + 非画像域一条（后者不进画像）
+  ledger.upsertObservation({ scopeId: 'user-global', subject: '偏好', predicate: '倾向', claimDomain: 'user_preference', text: '偏好A', evidenceIds: ['e1'] })
+  ledger.upsertObservation({ scopeId: 'user-global', subject: '环境', predicate: '使用', claimDomain: 'user_fact', text: '环境B', evidenceIds: ['e2', 'e3'] })
+  ledger.upsertObservation({ scopeId: 'user-global', subject: '工作', predicate: '暂停', claimDomain: 'work', text: '工作C', evidenceIds: ['e4'] })
+
+  const rep = auditLedger(ledger.db, parseArgs([]))
+  assert.equal(rep.profile.activeObservations, 3)
+  assert.equal(rep.profile.inProfile, 2, '只有 user_fact / user_preference 进画像')
+  assert.equal(rep.profile.stableFacts, 1)
+  assert.equal(rep.profile.preferences, 1)
+  assert.equal(rep.profile.sourceVersion, 2)
+  assert.ok(rep.profile.weight.max > rep.profile.weight.min, 'ev2 的那条应重于 ev1 的那条')
+  assert.ok(render(rep).includes('[画像段]'))
 })
 
 test('冷存一节：复用 planArchival 的判据（不另写一套阈值）', (t) => {
