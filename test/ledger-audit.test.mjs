@@ -93,8 +93,43 @@ test('render：产出人可读摘要且含关键段', () => {
   const { ledger } = makeLedger()
   seed(ledger)
   const text = render(auditLedger(ledger.db, parseArgs([])))
-  for (const head of ['=== ACP 账本体检（只读） ===', '[规模]', '[摄入面]', '[蒸馏]', '[召回窗]', '[注入分档]', '[observation]']) {
+  for (const head of ['=== ACP 账本体检（只读） ===', '[规模]', '[摄入面]', '[蒸馏]', '[召回窗]', '[注入分档]', '[observation]', '[候选池]', '[冷存清单]']) {
     assert.ok(text.includes(head), '缺少段落 ' + head)
   }
   assert.ok(text.includes('background skill reviewer'))
+})
+
+test('候选池一节：schema v7 有池时报状态/域/可导出域/跑批台账', (t) => {
+  const { ledger } = makeLedger()
+  t.after(() => ledger.close())
+  ledger.upsertCandidateMemory({ id: 'cm_w', claimDomain: 'work', subject: 's1', text: 'a', evidenceIds: ['e1'], occurrences: 2 })
+  ledger.upsertCandidateMemory({ id: 'cm_p', claimDomain: 'user_preference', subject: 's2', text: 'b', evidenceIds: ['e2'], occurrences: 1, state: 'approved' })
+  ledger.upsertCandidateMemory({ id: 'cm_f', claimDomain: 'external_fact', subject: 's3', text: 'c', evidenceIds: ['e3'], occurrences: 1, state: 'approved' })
+  ledger.recordDreamRun({ scanned: 3, clustered: 3, promoted: 1, archived: 0, note: 't' })
+
+  const rep = auditLedger(ledger.db, parseArgs([]))
+  assert.equal(rep.dream.hasPool, true)
+  assert.deepEqual(rep.dream.byState.map((x) => x.state).sort(), ['approved', 'candidate'])
+  assert.equal(rep.dream.exportable.n, 2, 'work + external_fact')
+  assert.equal(rep.dream.approvedExportable.n, 1, '画像域那条不算可导出')
+  assert.equal(rep.dream.multiMember.n, 1)
+  assert.equal(rep.dream.runs.length, 1)
+})
+
+test('候选池一节：旧库（无 candidate_memory）如实报「无」而不是崩', (t) => {
+  const { ledger } = makeLedger()
+  t.after(() => ledger.close())
+  ledger.db.exec('DROP TABLE candidate_memory')
+  const rep = auditLedger(ledger.db, parseArgs([]))
+  assert.equal(rep.dream.hasPool, false)
+  assert.ok(render(rep).includes('没有 candidate_memory'))
+})
+
+test('冷存一节：复用 planArchival 的判据（不另写一套阈值）', (t) => {
+  const { ledger } = makeLedger()
+  t.after(() => ledger.close())
+  const rep = auditLedger(ledger.db, parseArgs([]))
+  assert.equal(rep.coldStore.stats.ttlDays, 90)
+  assert.equal(rep.coldStore.stats.staleObservations, 0)
+  assert.equal(rep.coldStore.stats.staleEvidence, 0)
 })

@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from '../src/home.mjs'
 import { DEFAULT_DB_NAME } from '../src/constants.mjs'
 import { isConsolidationSkippable, isAckOnlySkippable } from '../src/consolidate.mjs'
+import { planArchival } from '../src/dream.mjs'
 import { sectionOf } from '../src/composer.mjs'
 import { authorityMayClaimDomain } from '../src/governance.mjs'
 import { estimateTokens, LINE_LABEL_TOKENS } from '../src/budget.mjs'
@@ -198,11 +199,35 @@ export function auditLedger(db, opts) {
     range: one("SELECT MIN(observed_at) f, MAX(observed_at) l FROM observation WHERE state='active'"),
   }
 
+  // ---------- Dreaming 候选池 + 冷存（§9 第 5 步，2026-09-22） ----------
+  // 候选池表是 schema v7 才有的；旧库（< 7）不存在，如实报「无」而不是崩。
+  const hasCandidatePool = Boolean(one("SELECT 1 x FROM sqlite_master WHERE type='table' AND name='candidate_memory'"))
+  const dream = hasCandidatePool
+    ? {
+      hasPool: true,
+      byState: all('SELECT state, COUNT(*) n FROM candidate_memory GROUP BY state ORDER BY n DESC'),
+      byDomain: all('SELECT claim_domain, COUNT(*) n FROM candidate_memory GROUP BY claim_domain ORDER BY n DESC'),
+      // 方案 4 的白名单口径（DREAMING.md §10）：只有这两域出得去 ACP
+      exportable: one("SELECT COUNT(*) n FROM candidate_memory WHERE claim_domain IN ('work','external_fact')"),
+      approvedExportable: one("SELECT COUNT(*) n FROM candidate_memory WHERE state='approved' AND claim_domain IN ('work','external_fact')"),
+      multiMember: one('SELECT COUNT(*) n FROM candidate_memory WHERE occurrences > 1'),
+      runs: all('SELECT datetime(ts/1000,\'unixepoch\') t, scanned, clustered, promoted, archived, dry_run FROM dream_run ORDER BY ts DESC LIMIT 5'),
+    }
+    : { hasPool: false }
+
+  // 冷存：只算计划，不改状态（与 scripts/dream.mjs 同一判据，复用 planArchival 避免漂移）
+  const coldStore = planArchival({
+    observations: all('SELECT id, state, created_at FROM observation').map((r) => ({ id: r.id, state: r.state, createdAt: r.created_at })),
+    evidence: all('SELECT id, state, created_at, updated_at FROM evidence').map((r) => ({ id: r.id, state: r.state, createdAt: r.created_at, updatedAt: r.updated_at })),
+  })
+
   return {
     ledger: opts.dir,
     scale,
     machine,
     distill,
+    dream,
+    coldStore,
     window: {
       session,
       sameSession: sameSession.length,
@@ -264,6 +289,25 @@ export function render(rep) {
   L.push('[observation]')
   L.push('  ' + rep.observation.byState.map((o) => o.state + ' ' + o.n).join(' · '))
   L.push('  区间 ' + (rep.observation.range.f ?? '-') + ' -> ' + (rep.observation.range.l ?? '-'))
+  L.push('')
+  L.push('[候选池] Dreaming（schema v7）')
+  if (!rep.dream.hasPool) {
+    L.push('  （本库没有 candidate_memory——schema < 7，或从未跑过 scripts/dream.mjs）')
+  } else {
+    L.push('  ' + (rep.dream.byState.map((x) => x.state + ' ' + x.n).join(' · ') || '（空）'))
+    L.push('  域: ' + (rep.dream.byDomain.map((x) => x.claim_domain + ' ' + x.n).join(' · ') || '-'))
+    L.push('  可导出域（work+external_fact）: ' + rep.dream.exportable.n
+      + '  其中已批准: ' + rep.dream.approvedExportable.n
+      + '  多成员簇: ' + rep.dream.multiMember.n)
+    for (const r of rep.dream.runs) {
+      L.push('     ' + r.t + '  scanned ' + r.scanned + ' → ' + r.clustered + ' 簇 · 晋升 ' + r.promoted
+        + ' · 冷存 ' + r.archived + (r.dry_run ? '  (dry-run)' : ''))
+    }
+  }
+  L.push('')
+  L.push('[冷存清单] 超 ' + rep.coldStore.stats.ttlDays + ' 天（只列单，不删）')
+  L.push('  superseded observation: ' + rep.coldStore.stats.staleObservations + ' 条')
+  L.push('  quarantined evidence:   ' + rep.coldStore.stats.staleEvidence + ' 条')
   return L.join('\n')
 }
 

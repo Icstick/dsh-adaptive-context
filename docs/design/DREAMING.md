@@ -197,3 +197,89 @@ W 机实测 11 个库（8 个知识库 + meta + verbatim + weaver）**`journal_m
 这与 weaver 条目 `workflow/wv-20260911-12481` 记载的「全库转 WAL 后连续写入 2.4 万条」**不符**。
 回滚模式下写者提交期独占锁、读者会挡住写者，读写并发弱于 WAL。
 → 归属 weaver 侧核查（A/B 机状态本轮未取到），**不建议在核查前让 ACP 直写**。
+
+## 11. 云端 staging 精馏（用户提议，2026-09-22 评估）
+
+> 提议：**在 weaver 里设一个缓存分支库，云端计划任务对整库做精馏的同时，接纳缓存库的内容。**
+> 评估结论：**方向比 §10 的方案 4 更对，建议作为 P2 的目标形态**；但只能先设计——云端与 A/B 机本轮均不可达。
+
+### 11.1 为什么它更好
+
+1. **物理分离做在了 weaver 层**，不只是 ACP 层：staging 与生产库是两个 db，未经晋升的内容**根本没有机会**进入检索面。
+2. **晋升门放在了权威点上**：云端本来就是唯一串行化点（wv-sync.ps1:286 的 `flock -n merge.lock`）。门开在权威点，才谈得上「唯一」。
+3. **精馏与接纳共用一次全库扫描**——两者本来都要「读全库 + 判重复/归并」，分两次是浪费。
+4. **消掉了人工门的积压问题**：实测蒸馏 13.2 条/天，逐条人工审不现实（§10.3 已把这个列为方案 4 的已知代价）。
+
+### 11.2 三个必须先解决的点
+
+#### ① 缓存库**不该**进 LIBS
+
+§10 反对「新增第 10 个 weaver 库」的理由是硬编码散在 4 处以上（weaver-query.mjs:18、dsh-weaver/index.mjs:68、search.mjs:13 ALL_LIBS、wv.mjs:26 LIBS）+ sync-manifest/parity 清单。
+**但那个成本的前提是「它要能被检索」。staging 不需要被检索**——它只是云端的暂存 db，由精馏任务读写。
+→ 所以：**不要把它做成 weaver 库，做成 <weaver-kb>/staging.db 一个独立 db**。不进 LIBS、不进检索面、不进 parity 比对。成本从「4+ 处协调」降到 **0**。
+
+#### ② 归属问题被白名单消掉了——但必须带来源标记
+
+§10.1 说「归属风险仍然成立」，前提是画像域会入共享库。方案 4 的白名单只放 work / external_fact——**这两类是共享知识，不是画像**，三机共用 staging 在语义上是安全的。
+但 staging 条目**必须带来源槽位**（复用 wv-sync 已有的 WEAVER_SLOT a/b/w 概念），理由见下。
+
+#### ③ 「同时」要拆开：接纳是确定性的，精馏不是
+
+| 步骤 | 性质 | 失败后果 |
+|---|---|---|
+| **接纳** | 格式校验 + content_hash 去重 + 幂等写 staging | 可重试，零风险 |
+| **精馏** | 判该不该晋升 / 同义归并 / 改写标题（可能用 LLM） | 实测蒸馏失败率 **37%**，不该拖累接纳 |
+
+→ 两个任务、两个退出码，别混成一个。
+
+### 11.3 一个真正的增量：跨机复现
+
+staging 带来了单机 ACP **根本不可能有**的判据：**同一件事被几台机器独立提到过。**
+
+```
+跨机复现 >= 2   →  最强晋升信号（三机独立提到，比一台机器重复十次可靠得多）
+```
+
+这与 dreaming 已有的确定性判据天然对齐（candidate_memory 的 occurrences / sessions / days 都已算好），**是加法而不是新机制**。
+
+### 11.4 建议的目标形态
+
+```
+每机 W/A/B：
+  ACP dreaming → candidate_memory → dream-export --state approved
+      （白名单已挡画像三域；这一步现在就做好了）
+  ↓ scp（复用 wv-sync 的 inbound/<slot>/ 形态）
+云端 /mnt/datadisk/weaver/：
+  inbound/<slot>/*.jsonl
+  ↓ flock ── 接纳（确定性）：格式校验 + content_hash 去重 + 幂等写 staging.db
+  ↓ flock ── 精馏（可与全库精馏同一次扫描）：产出晋升提案
+      判据：跨机复现 >= 2  或  (本机复现 >= N 且 authority 高)
+  ↓ 自动接纳（因为已是「白名单 × 阈值」两道过滤之后的产物）
+  wv import → 生产库，source = acp-dreaming:<id>
+  ↓ outbound
+各机：wv sync-pull
+```
+
+**可回滚**：接纳时 source 带 acp-dreaming:<候选 id> 前缀，出问题按前缀批量 wv rm（wv.mjs:472-503 记墓碑并跨机传播）+ 云端每日备份（ensureDailyBackup wv.mjs:126-134）。
+
+### 11.5 与 P1 的关系：不废弃，是上游
+
+本地这条链（dream.mjs → candidate_memory → dream-review → dream-export）**原样是 P2 的上游**——
+P2 只是把 dream-export 的输出目标从「本地 JSONL 交给人」换成「推云端 inbound」。
+人工门退化为**兜底**（默认不参与），而不是主路径。
+
+### 11.6 未决 / 未取到
+
+- **云端与 A/B 机本轮不可达**：129.28.69.74:2222 timeout、ZeroTier 10.173.250.80/.92 timeout。所有跨机部分**只能设计，不能验**。
+- **精馏那步用不用 LLM 没定**：若不用，纯确定性判据（11.3）够不够，需要拿真实 staging 数据试。若用，云端的 LLM 通道**未确认**（云端有门户站，但没查过它有没有模型通道）。
+- **云端 wv-merge.mjs 的协议只见过调用点**（wv-sync.ps1:286），没读过实现。要接进去必须先读懂它，否则会撞上 wv-sync.ps1:117-135 那条「协议实现不一致 → 静默把每条都判成冲突」的坑。
+
+### 11.7 结论
+
+**采纳为 P2 目标形态。** 三个动作按依赖排序：
+
+1. ~~本地 P1 闭环~~（已完成：src/dream.mjs + candidate_memory + dream-review + dream-export）
+2. **等链路恢复**：读 wv-merge.mjs、确认云端 LLM 通道、在云端建 staging.db
+3. **改 dream-export 的输出目标**为云端 inbound（复用 wv-sync 的 slot 形态）
+
+**P1 不做废**：它现在是 P2 的上游，人工门退为兜底。
