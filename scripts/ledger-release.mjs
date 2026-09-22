@@ -37,6 +37,7 @@ export function parseArgs(argv) {
     authorities: csv(a.authorities),
     sample: Number(a.sample ?? 12),
     revoke: a.revoke || '',
+    allowNoise: a['allow-noise'] === '1' || a['allow-noise'] === 'true',
     apply: a.apply === '1' || a.apply === 'true',
   }
 }
@@ -82,8 +83,17 @@ function main() {
     const inScope = pending.filter((r) =>
       (!opts.domains || opts.domains.includes(r.claim_domain)) &&
       (!opts.authorities || opts.authorities.includes(r.authority)))
+    // 质量闸门：默认开（--allow-noise 可关，用于「我知道这批次脏、但我要它」的场合）
+    const rejects = []
+    const passed = opts.allowNoise ? inScope : inScope.filter((r) => {
+      const why = qualityVerdict(r)
+      if (why) { rejects.push({ why, id: r.id, subject: r.subject, text: String(r.text).slice(0, 50) }); return false }
+      return true
+    })
+    const byReject = {}
+    for (const x of rejects) byReject[x.why] = (byReject[x.why] ?? 0) + 1
     const byDomain = {}, byAuthority = {}, byFrom = {}
-    for (const r of inScope) {
+    for (const r of passed) {
       byDomain[r.claim_domain] = (byDomain[r.claim_domain] ?? 0) + 1
       byAuthority[r.authority ?? '(null)'] = (byAuthority[r.authority ?? '(null)'] ?? 0) + 1
       byFrom[r.from] = (byFrom[r.from] ?? 0) + 1
@@ -91,28 +101,54 @@ function main() {
     const out = {
       mode: opts.apply ? 'APPLY' : 'DRY-RUN',
       db: path.join(opts.dir, 'acp-ledger.db'),
+      qualityGate: opts.allowNoise ? 'OFF (--allow-noise)' : 'ON',
+      rejectedByGate: rejects.length,
+      byReject,
+      rejectSample: rejects.slice(0, 6),
       manifests: opts.manifests,
       domains: opts.domains ?? '(全部)',
       authorities: opts.authorities ?? '(全部)',
       importedRows: rows.length,
       alreadyActive: rows.length - pending.length,
-      toRelease: inScope.length,
+      toRelease: passed.length,
       byDomain, byAuthority, byFrom,
-      sample: inScope.slice(0, opts.sample).map((r) => '[' + r.from + '/' + r.claim_domain + '] ' + r.subject + ' ' + r.predicate + ' → ' + String(r.text).slice(0, 60)),
+      sample: passed.slice(0, opts.sample).map((r) => '[' + r.from + '/' + r.claim_domain + '] ' + r.subject + ' ' + r.predicate + ' → ' + String(r.text).slice(0, 60)),
     }
     if (opts.apply) {
       const stmt = ledger.db.prepare("UPDATE observation SET state = 'active' WHERE id = ? AND state = 'quarantined'")
       let n = 0
-      for (const r of inScope) n += Number(stmt.run(r.id).changes)
+      for (const r of passed) n += Number(stmt.run(r.id).changes)
       out.released = n
       const f = path.join(path.dirname(opts.manifests[0]), 'released-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.json')
-      writeFileSync(f, JSON.stringify({ releasedAt: new Date().toISOString(), domains: opts.domains, authorities: opts.authorities, ids: inScope.map((r) => r.id) }, null, 1), 'utf8')
+      writeFileSync(f, JSON.stringify({ releasedAt: new Date().toISOString(), domains: opts.domains, authorities: opts.authorities, qualityGate: out.qualityGate, rejected: rejects.length, ids: passed.map((r) => r.id) }, null, 1), 'utf8')
       out.releaseList = f
     }
     console.log(JSON.stringify(out, null, 1))
   } finally {
     ledger.close?.()
   }
+}
+
+// ===================== 质量闸门（S3 第二批前加的；见 docs/ops/s3-batch1-release-*.md §3）=====================
+// 背景：第一批放行后抽样发现 4.2% 噪声，分三类。闸门只拦这三类，别的一律放行（不过度设计）。
+//   EPHEMERAL  —— 会话临时态被蒸成持久事实（"用户同意继续当前任务"是典型）
+//   SELFREF    —— 主语是机器（user / assistant / user-xxx），不是用户
+//   EN_ONLY    —— 整条无中文且偏长，多半是模型用英文写的转述
+export const EPHEMERAL_RE = /同意继续|已重启|正在|先试|本轮|本次|当前会话|当前任务|刚刚|刚才|目前已|已安装完成|已处理完|待办已/
+export const SELFREF_SUBJECT_RE = /^(user|assistant|agent|session|subagent|tool)\b|^user-|^assistant-|^session-/i
+export function isEnglishOnly(text) {
+  const t = String(text ?? '')
+  return !/[\u4e00-\u9fff]/.test(t) && t.trim().length > 12
+}
+
+/** @returns {string|null} 拒绝原因；null = 通过 */
+export function qualityVerdict(row) {
+  const text = String(row.text ?? '')
+  const subject = String(row.subject ?? '')
+  if (SELFREF_SUBJECT_RE.test(subject)) return 'selfref-subject'
+  if (EPHEMERAL_RE.test(text)) return 'ephemeral'
+  if (isEnglishOnly(text)) return 'english-only'
+  return null
 }
 
 const isMain = (() => {
