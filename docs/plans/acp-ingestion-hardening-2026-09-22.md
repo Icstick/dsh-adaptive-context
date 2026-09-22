@@ -175,6 +175,13 @@ B1 的影响面已核实：全机 16 个已安装插件里，只有 `dsh-context
 
 ## 7. 遗留待拍板
 
+3. **`subagentDowngrade` 的默认值安全网**（2026-09-22 写 e2e 用例时暴露）：`src/index.mjs` 里
+   `config.subagentDowngrade === true` 没有 `?? true` 兜底，而同文件其它配置读法都带了
+   （`startupRebuild ?? true`、`recallLimit ?? 20`、`crossSessionPolicy ?? 'non-instructional'`）。
+   生产环境由宿主套用 Config schema 默认值所以目前是 true；一旦某个宿主/直调路径没套默认值，
+   子代理父任务书会被静默记成 `user_explicit`（本轮的 e2e 用例首次运行就是这么挂的，被断言抓住）。
+   一行改动即可加安全网，但属于本轮授权范围外，登记待定。
+
 1. **A1 的边界**：是否连 `tool/result` 一起收？（`assistant/` 建议直接收，`tool/` 建议单列。）
 2. **B 的归属**：`acp.append` 要不要承担摄入判据——这是公共契约变更，且 maid 侧还有第二种解法（B2）。
 
