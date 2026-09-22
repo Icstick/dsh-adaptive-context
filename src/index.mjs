@@ -16,7 +16,7 @@ import { resolveDshHome } from './home.mjs'
 import { openEvidenceLedger } from './store.mjs'
 import { createAcpService } from './service.mjs'
 import { createExpression } from './expression.mjs'
-import { isEvidenceWorthy, toEvidenceCandidate } from './extract.mjs'
+import { isEvidenceWorthy, toEvidenceCandidate, sessionTypeOf } from './extract.mjs'
 import { isNeverApprovalPolicy } from './expression.mjs'
 import { maybeDraft } from './feedback.mjs'
 import { makeAcpQueryTool } from './tools.mjs'
@@ -546,12 +546,17 @@ export function apply(ctx, config = {}) {
         scopeId: scopeOf(ctx),
         sessionId: session?.id ?? '',
         agentKey: event.agentKey ?? '',
-        sessionType: event.sessionType ?? 'root',
+        // C（2026-09-22）：会话类型从 session.header.origin 派生。此前读的是**事件**上的
+        // sessionType —— 事件没有该字段，于是账本 session_type 恒为 'root'（W 机实测 2400/2400、
+        // subagent 零条），读侧按会话类型隔离无从下手。派生子见 extract.sessionTypeOf。
+        sessionType: sessionTypeOf(session),
         // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine
         subagent: config.subagentDowngrade === true && session?.header?.origin === 'subagent',
       })
       if (!ev) return
-      const res = acp.append(ev)
+      // B1（2026-09-22）：显式声明来源，才能过 append 的摄入闸门；
+      // 未声明的直写会被强制 quarantine（见 service.mjs append 注释）。
+      const res = acp.append({ ...ev, ingest: 'session-event' })
       // 审计：已落 acp audit 表（M3 C1）；harness 若收录 acp/* 词汇可再 append session event
       if (config.debug) {
         ctx.logger?.debug?.('[acp] ingest ' + res.decision + ' id=' + res.id)
