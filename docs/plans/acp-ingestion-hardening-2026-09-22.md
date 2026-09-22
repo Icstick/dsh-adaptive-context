@@ -182,6 +182,22 @@ B1 的影响面已核实：全机 16 个已安装插件里，只有 `dsh-context
 所以第三方直写方目前仅一家。落地后 maid 的归档**仍然记录**（不丢审计），但缺省落 `quarantined`、不注入；
 若确认要可召回，应改走 `upsertObservation`（与其 design.md 的原意一致），而不是放宽闸门。
 
+## 6.1 存量隔离执行记录（2026-09-22）
+
+- **档位：C**（T1a+T1b+T1c+T2+T3）。用户 2026-09-22 拍板；memory 段随之为空，用户已知情并同意「先空下来晚些做」。
+- 命令：`node scripts/ledger-quarantine-apply.mjs --dir <ledgerDir> --tier C --apply`
+- 执行前备份：`acp-ledger.db.bak-2026-09-22T04-22-52-quarantine{-wal,-shm}`
+- 结果：**2151 条 → quarantined，0 失败**；active 2405 → 263。
+- 审计：`op=quarantine_noise`，actor=user，payload 带层名/计数/20 条 id 样本。
+- observation 未受影响（43 active / 20 superseded）——候选清单把被引用的 58 条证据留在 KEEP。
+- 回滚（一条命令，认 reviewStatus 标记，不依赖侧车清单）：
+  `node scripts/ledger-quarantine-apply.mjs --dir <ledgerDir> --revert --apply`
+
+隔离后的注入面（实测）：召回窗 36 → 32 条，构成从「experience 24 / user_fact 8 / corr 2」变为
+**「user_fact 30 / corr 2」——100% 真人消息**；分档只剩 user_model。
+另注：C 档不含 T5（极短用户消息 ≤15 字，70 条），active 里仍有 123 条 ≤15 字，它们现在是
+user_model 段的主要内容，可作为下一批单独处理。
+
 ## 7. 遗留待拍板
 
 3. ~~**`subagentDowngrade` 的默认值安全网**~~ —— **已落地（`9685b8e`）**，并补了「故意不传该键仍降权」的断言。原记录：`src/index.mjs` 里

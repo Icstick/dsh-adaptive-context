@@ -6,7 +6,9 @@ import { mkdtempSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
-import { parseArgs, selectAndQuarantine, backupLedger, TIER_PRESETS } from '../scripts/ledger-quarantine-apply.mjs'
+import {
+  parseArgs, selectAndQuarantine, backupLedger, revertByMarker, TIER_PRESETS, REVERT_MARKER,
+} from '../scripts/ledger-quarantine-apply.mjs'
 
 const EV = {
   sensitivity: 'private', confidence: 0.5, durability: 0.5,
@@ -71,6 +73,35 @@ test('--limit 只处理前 N 条（试跑）', () => {
   const res = selectAndQuarantine(ledger.db, ledger, parseArgs(['--tier', 'C', '--apply', '--limit', '1']))
   assert.equal(res.ids.length, 1)
   assert.equal(res.applied, 1)
+})
+
+test('revertByMarker：dry-run 只数不改；--apply 放回 active 并写 rollback 审计', () => {
+  const { ledger } = makeLedger()
+  const applied = selectAndQuarantine(ledger.db, ledger, parseArgs(['--tier', 'B', '--apply']))
+  assert.equal(applied.applied, 2)
+
+  // dry-run：数得对，一行不改
+  const dry = revertByMarker(ledger.db, ledger, { apply: false })
+  assert.equal(dry.ids.length, 2)
+  assert.equal(dry.reverted, 0)
+  assert.equal(ledger.getById(dry.ids[0]).state, 'quarantined')
+
+  // apply：放回 active
+  const rv = revertByMarker(ledger.db, ledger, { apply: true })
+  assert.equal(rv.reverted, 2)
+  assert.equal(rv.errors.length, 0)
+  for (const id of rv.ids) assert.equal(ledger.getById(id).state, 'active')
+  const audits = ledger.auditStore.queryAudit({ op: 'rollback' }).items
+  assert.equal(audits.length, 1)
+  assert.ok(String(audits[0].reason).includes('marker=' + REVERT_MARKER))
+})
+
+test('revertByMarker：标记不匹配时不误伤别处的 quarantine', () => {
+  const { ledger } = makeLedger()
+  ledger.setState(ledger.query({}).items[0].id, 'quarantined')  // 非本批的隔离
+  const rv = revertByMarker(ledger.db, ledger, { apply: true })
+  assert.equal(rv.ids.length, 0, '没有 marker 的行不得被回滚')
+  assert.equal(rv.reverted, 0)
 })
 
 test('backupLedger：db 三件一起拷（WAL 可恢复）', () => {
