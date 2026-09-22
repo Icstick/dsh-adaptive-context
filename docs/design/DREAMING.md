@@ -283,3 +283,44 @@ P2 只是把 dream-export 的输出目标从「本地 JSONL 交给人」换成�
 3. **改 dream-export 的输出目标**为云端 inbound（复用 wv-sync 的 slot 形态）
 
 **P1 不做废**：它现在是 P2 的上游，人工门退为兜底。
+
+## 12. Profile 视图：approved 画像域候选的下游（2026-09-22，待确认）
+
+> 缺口：§10 的导出器只服务 `work` / `external_fact`。**画像三域（user_preference / user_fact / style）被批准之后没有下游**——
+> 状态变成 approved，然后什么也不发生。这与 §11.5 说的「人工门退为兜底」是同一问题的两面。
+
+### 12.1 三个形态
+
+| | 做法 | 代价 | 契约影响 |
+|---|---|---|---|
+| **A0（最小）** | **先把 Profile 视图实现出来**，由 observation 构建（`stableFacts` / `preferences`），`user_model` 段改从 Profile 取。**暂不引入「人工确认」概念** | 中：新视图 + composer 候选源改动 + 重建链路 | 无（CONTRACTS §4 原文就是 ObservationRef[]） |
+| **A1（快）** | Profile 直接由 `candidate_memory`（approved 画像域）构建，跳过 observation 那一跳 | 小 | **要改契约**：数组类型从 `ObservationRef[]` 变成候选引用 |
+| **A2（正）** | `observation` 加 `confirmed_at` / `confirmed_by`（schema v8）；人工批的候选 → 拿它的 evidenceIds upsert observation 并标 confirmed；Profile 仍从 observation 建，多一个 `confirmedOnly` 过滤 | 大：schema v8 + 迁移 | 无 |
+
+**建议：先 A0。** 理由——「画像层不存在」是比「人工确认」更大的缺口：现在 `user_model` 段是 **228 条 evidence 直供**（真人短消息），
+而 CONTRACTS §4 定义的 Profile（五数组、可追溯到 session event）**一行实现都没有**。人工确认是建在 Profile 之上的一层，不是它的替代。
+
+### 12.2 A0 的具体形态（待确认后再动代码）
+
+```
+输入：observation 表（active）
+输出：profile 视图行 —— stableFacts / preferences 两组（+ recentState 暂空，见 CONTRACTS §4「v0.1 启用」）
+可追溯：profile item -> ObservationRef -> evidenceIds -> session event（三级回链必须能走通）
+重建：rebuild('profile')，与现有 expression 视图同一套机制（src/rebuild.mjs）
+注入：composer 的 user_model 候选源从「evidence 直供」改为「profile 行」
+```
+
+**风险点（动代码前必须先看的两处）**：
+1. **注入预算受 `budget.test` 守护**（AGENTS.md 铁律 5）——改候选源要确认 800 token 配额与三级承诺不回退。
+2. **`user_model` 段现在有 228 条 evidence 候选**，换成 profile 之后会骤降。这是**预期**（画像本来就该是几条稳定结论，不是 228 条消息），但要先量出降幅再决定是否接受。
+
+### 12.3 与 §11 的关系
+
+A0 不改变 §11 的云端方案：导出器仍只导 `work` / `external_fact`。
+A0 解决的是**另一半**——画像域的 approved 终于有了消费者（进 Profile，再进 `user_model` 段）。
+
+### 12.4 在此之前的一个临时判断
+
+`approved` 这个状态**在 A0 落地前，对画像域是空转的**。两条可选：
+- 接受空转，把它当作「人工已确认」的预留标记（数据不浪费，等 A0 来消费）；
+- 或暂时不批画像域候选，避免状态语义与行为不符。
