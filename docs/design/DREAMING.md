@@ -300,19 +300,50 @@ P2 只是把 dream-export 的输出目标从「本地 JSONL 交给人」换成�
 **建议：先 A0。** 理由——「画像层不存在」是比「人工确认」更大的缺口：现在 `user_model` 段是 **228 条 evidence 直供**（真人短消息），
 而 CONTRACTS §4 定义的 Profile（五数组、可追溯到 session event）**一行实现都没有**。人工确认是建在 Profile 之上的一层，不是它的替代。
 
-### 12.2 A0 的具体形态（待确认后再动代码）
+### 12.2 A0 的实现形态（2026-09-22 已落地，与本节初稿有两处不同）
 
 ```
-输入：observation 表（active）
-输出：profile 视图行 —— stableFacts / preferences 两组（+ recentState 暂空，见 CONTRACTS §4「v0.1 启用」）
-可追溯：profile item -> ObservationRef -> evidenceIds -> session event（三级回链必须能走通）
-重建：rebuild('profile')，与现有 expression 视图同一套机制（src/rebuild.mjs）
-注入：composer 的 user_model 候选源从「evidence 直供」改为「profile 行」
+新增 src/profile.mjs：buildProfile(observations) / profileRefs / profileToCandidates
+  输入：observation（active，已过 authority 闸门与动作流水过滤）
+  输出：CONTRACTS §4 五数组；MVP 只有 stableFacts(user_fact) / preferences(user_preference)
+  可追溯：每条 ref 带 observationId + evidenceIds → Observation → Evidence → session event
+注入：index.mjs 的 user_model 候选源改为 profileToCandidates(...)，
+      **同时把 evidence 的画像两域从 ledgerCandidates 里滤掉**（否则两处重复供同一段）
 ```
 
-**风险点（动代码前必须先看的两处）**：
-1. **注入预算受 `budget.test` 守护**（AGENTS.md 铁律 5）——改候选源要确认 800 token 配额与三级承诺不回退。
-2. **`user_model` 段现在有 228 条 evidence 候选**，换成 profile 之后会骤降。这是**预期**（画像本来就该是几条稳定结论，不是 228 条消息），但要先量出降幅再决定是否接受。
+**与初稿不同的两处**：
+1. **Profile 不落盘**，每步从 observation 现算。初稿写的是 `rebuild('profile')`。改理由：源只有几十条，
+   派生成本≈0，而落盘视图会引入「缓存陈旧」整类故障。views are rebuildable——现算的视图天然可重建，
+   比落盘的更贴契约。（`rebuild.mjs` 的 `checkDeps` 还要求 `candidateStore.replayCandidates`，为 profile 放宽它不划算。）
+2. **`observationToCandidate` 从 index.mjs 搬到 `src/candidates.mjs`**。否则 profile.mjs 要 import index.mjs，
+   形成 index → profile → index 环（depcruise 会拦）。index.mjs 仍 re-export，既有调用方与测试不受影响。
+
+**风险点复核（两处都查了）**：
+1. **`budget.test` 守护的 800 token 配额**——全量测试通过，三级承诺未回退。
+2. **候选降幅**——实测见 §12.5。
+
+### 12.5 实测：语义目标达成，但**注入面几乎没变**（与预期不符）
+
+用同一份 live 账本跑 `compose()` 对比两套装配（`maxTokens 1600` + 生产配额）：
+
+| | 候选数 | admitted | user_model tok | work_state | memory | expression | total |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 改动前（evidence 画像域直供 + observation） | 79 | 29 | **765** | 224 | 214 | 52 | 1255 |
+| 改动后（Profile 供 user_model） | 54 | 26 | **766** | 224 | 214 | 52 | 1256 |
+
+**§12.2 初稿预测的「骤降」没有发生**，原因在 `dropped` 清单里写得很清楚：改动前那 12 条跨会话 evidence
+画像域候选，**早就被 `cross-session-instructional` 闸门挡掉了**；同会话窗口里的 evidence 画像域本来就没几条。
+也就是说 `user_model` 段此前**已经是**由 observation 填满的（旧装配的 dropped 里全是 `section 'user_model' budget`
+的 obs_*）。A0 的实际收益是：
+
+- **候选 79 → 54**（每次 pre-step 少组装 25 条、少跑一遍读矩阵与排序）
+- **语义正确**：画像段现在有单一来源与分组语义（stableFacts / preferences），不再是「碰巧落在窗口里的原始消息」
+- **为 §12 的 A2 铺路**：`approved` 的画像域候选终于有地方可去（Profile）
+
+**顺带查出一个工具口径问题**：`scripts/ledger-audit.mjs` 的 `[注入分档]` 是**近似**——
+它只做「窗口 + 读矩阵 + 内容去重」，**不含跨会话闸门与实际 section 预算裁剪**，所以会高估（它报 user_model 121%，
+而 `compose()` 实际装到 766/800 ≈ 96%）。用它看趋势可以，别拿它当注入面的真值。
+
 
 ### 12.3 与 §11 的关系
 
