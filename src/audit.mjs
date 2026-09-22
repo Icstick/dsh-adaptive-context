@@ -41,6 +41,8 @@ export const AUDIT_OPS = Object.freeze([
   'rule_ineffective_suspect',
   // Dreaming（2026-09-22）：离线巩固跑批（scripts/dream.mjs）
   'dream',
+  // Dreaming（2026-09-22）：候选池人工审（scripts/dream-review.mjs）
+  'dream_review',
 ])
 
 /** 审计行为者枚举 */
