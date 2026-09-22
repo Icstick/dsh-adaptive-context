@@ -203,7 +203,7 @@ pnpm install
 
 - **注入**：agent/pre-step waterfall——composer 汇总四源（ledger 证据 / expression 物化视图 / observation 蒸馏轨 / MemOS 等 recall provider），按 section quota + hotTokens 装箱，渲染为 source-labelled plugin user message（跨会话条目带 `session=` 标记与引导语）
 - **调度器**：宿主 inject-scheduler 为可选服务——ACP 注册 `acp.composer` 段（budget=hotTokens，token 口径；未挂 scheduler 时静默跳过，pre-step 注入照常）
-- **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计
+- **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计；两侧统一**按时间倒序**（最新优先）——observation 侧原实现直接切 `listObservations()`（created_at ASC 快照口径），固定返回最老的 N 条，最新蒸馏结论不可见（2026-09-22 修复）
 - **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
 - **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导，**取支撑证据中最弱的一条**（2026-09-09 非放大规则，防弱证据洗白强权威）；注入侧只放行白名单权威（T2）
 - **审计可对账（2026-09-11）**：consolidation 的成功/失败审计行都带批次区间与首尾证据 id（`batchFrom`/`batchTo`/`batchFirstId`/`batchLastId`）——用来区分「已处理但零产出」与「被水位线跳过」；水位线只推进到**本批最大 observedAt**，空批次不写（旧实现会盖成 now，任何早于 now 的回填/时钟偏移证据都会被静默跳过）

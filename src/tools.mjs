@@ -105,6 +105,13 @@ export function queryLedgerForTool(deps, input = {}) {
       const obs = ledger.listObservations(scopeId) || []
       observations = obs
         .filter((o) => o && typeof o.text === 'string' && o.text.length > 0)
+        // 2026-09-22 修复（W 机账本审计 §五）：listObservations 是 created_at ASC 的
+        // **快照**口径（store.mjs），此处直接 slice 会永远返回最老的 N 条——最新蒸馏
+        // 结论在 acp_query 里不可见，导致「隔离/精炼后复查」看到的是错误样本。
+        // 工具面改为按 observedAt 倒序，与 evidence 侧 ORDER BY observed_at DESC 同口径；
+        // 同 observedAt 再按 id 比较，保证确定性（不依赖 Array.sort 的稳定性假设）。
+        .sort((a, b) => String(b?.observedAt ?? '').localeCompare(String(a?.observedAt ?? ''))
+          || String(b?.id ?? '').localeCompare(String(a?.id ?? '')))
         .slice(0, limit)
         .map((o) => ({
           id: o.id,
