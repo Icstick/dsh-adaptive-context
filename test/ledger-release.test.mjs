@@ -3,7 +3,7 @@
 // 覆盖：质量闸门三类拒因 / planImport 的域过滤·内容键去重·改写为 quarantined
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { qualityVerdict, isEnglishOnly, EPHEMERAL_RE, SELFREF_SUBJECT_RE } from '../scripts/ledger-release.mjs'
+import { qualityVerdict, isEnglishOnly } from '../scripts/ledger-release.mjs'
 import { planImport, DEFAULT_DOMAINS } from '../scripts/ledger-import.mjs'
 
 const row = (over = {}) => ({ subject: '用户', predicate: '偏好', claimDomain: 'user_preference', text: '偏好先出计划文档', ...over })
