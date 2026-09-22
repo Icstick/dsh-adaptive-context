@@ -550,8 +550,11 @@ export function apply(ctx, config = {}) {
         // sessionType —— 事件没有该字段，于是账本 session_type 恒为 'root'（W 机实测 2400/2400、
         // subagent 零条），读侧按会话类型隔离无从下手。派生子见 extract.sessionTypeOf。
         sessionType: sessionTypeOf(session),
-        // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine
-        subagent: config.subagentDowngrade === true && session?.header?.origin === 'subagent',
+        // 子代理会话（header.origin==='subagent'）：user 消息（父 prompt）降权 quarantine。
+        // 2026-09-22：补 `?? true` 默认值安全网。apply() 不套用 Config 的 schema 默认值（那是宿主做的），
+        // 而这里的写法是 `=== true`——一旦宿主/直调路径没套默认，降权会静默关闭，子代理父任务书
+        // 会被记成 user_explicit（写 e2e 用例时实测到过）。同文件其它配置读法都带了 `??` 兜底。
+        subagent: (config.subagentDowngrade ?? true) === true && session?.header?.origin === 'subagent',
       })
       if (!ev) return
       // B1（2026-09-22）：显式声明来源，才能过 append 的摄入闸门；

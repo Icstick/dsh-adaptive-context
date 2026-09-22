@@ -43,9 +43,10 @@ test('摄入链端到端：A1 不收 assistant / C 落 subagent / B1 直写缺�
   t.after(() => { disposeAll(); rmSync(dir, { recursive: true, force: true }) })
 
   // 注意：apply() **不会**套用 Config 的 schema 默认值（那是宿主加载时做的）。
-  // 直接驱动 apply() 的用例必须自己把默认值补齐——否则 subagentDowngrade 等键为
-  // undefined，读侧那些 `config.x === true` 的判断会静默走 false 分支（本用例首次运行时
-  // 就是这样把子代理父任务书记成了 user_explicit，被断言当场抓住）。
+  // 直接驱动 apply() 的用例要么自己补齐默认值，要么依赖代码里的 `??` 兜底。
+  // 本用例首次运行时正是踩在这里：subagentDowngrade 读 `=== true` 且无兜底，把子代理
+  // 父任务书记成了 user_explicit，被断言当场抓住。2026-09-22 已给该键补 `?? true` 安全网；
+  // 下面仍显式传值，是为了让用例不依赖兜底本身（兜底另有断言）。
   apply(ctx, {
     ledgerDir: dir,
     observationInjection: false,
@@ -95,4 +96,24 @@ test('摄入链端到端：A1 不收 assistant / C 落 subagent / B1 直写缺�
   const directRow = rows.find((r) => r.content === '插件直写')
   assert.equal(direct.decision, 'quarantine', 'B1：直写缺省隔离')
   assert.equal(directRow.state, 'quarantined')
+})
+
+test('subagentDowngrade 缺省兜底：配置未给该键时仍降权（不依赖宿主套默认）', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'acp-wiring2-'))
+  const { ctx, handlers, disposeAll } = makeCtx()
+  t.after(() => { disposeAll(); rmSync(dir, { recursive: true, force: true }) })
+
+  // 故意**不传** subagentDowngrade —— 模拟宿主没套 Config 默认值的路径
+  apply(ctx, { ledgerDir: dir, observationInjection: false, startupRebuild: false, memosEnabled: false, recallProviders: [] })
+  const sub = { id: 'sub-2', header: { origin: 'subagent' } }
+  for (const fn of handlers.get('session/event') ?? []) {
+    fn(sub, { type: 'user/message', seq: 1, content: '你是 YY 代理，任务是…' })
+  }
+
+  const db = new DatabaseSync(path.join(dir, DEFAULT_DB_NAME), { readOnly: true })
+  const row = db.prepare("SELECT authority, session_type FROM evidence WHERE content LIKE '你是 YY 代理%'").get()
+  db.close()
+  disposeAll()
+  assert.equal(row.authority, 'agent_inference', '缺省兜底必须为 true，否则父任务书会冒充 user_explicit')
+  assert.equal(row.session_type, 'subagent')
 })
