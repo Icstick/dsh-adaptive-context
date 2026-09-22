@@ -206,13 +206,14 @@ pnpm install
 - **acp_query 工具**（2026-09-04，对话即界面）：只读查询 evidence（authority/domain/state 过滤 + 关联 observation），查询全走读审计；两侧统一**按时间倒序**（最新优先）——observation 侧原实现直接切 `listObservations()`（created_at ASC 快照口径），固定返回最老的 N 条，最新蒸馏结论不可见（2026-09-22 修复）
 - **expression 审批面板**：consolidation 产出的 style 候选（few-shot 表达式）在 pre-step 以 approval.request 发起人工审批（config.autoPromote=false 默认人工）
 - **观察轨（observation）**：turn/end 后 background consolidation 蒸馏证据为 observation（subject/predicate 键 + 文本）；authority 由证据推导，**取支撑证据中最弱的一条**（2026-09-09 非放大规则，防弱证据洗白强权威）；注入侧只放行白名单权威（T2）
+- **摄入边界（2026-09-22，C/A1）**：证据只从**真人输入 + 工具输出**来——`assistant/message` 形态的模型自述**不再摄入**（此前它绕过 7f12557 的 inbox 白名单，走 `WORTHY_PREFIXES` 兜底分支；W 机实测该修复落地后新入账证据里仍有 85.6% 是 agent 自产）。`tool/` 暂留（对应 external_information「工具输出补充工作经验」的设计意图）。会话类型改由 `extract.sessionTypeOf(session)` 从 `session.header.origin` 派生——此前读的是事件上的 `sessionType`（该字段不存在），账本 `session_type` 恒为 `root`
 - **审计可对账（2026-09-11）**：consolidation 的成功/失败审计行都带批次区间与首尾证据 id（`batchFrom`/`batchTo`/`batchFirstId`/`batchLastId`）——用来区分「已处理但零产出」与「被水位线跳过」；水位线只推进到**本批最大 observedAt**，空批次不写（旧实现会盖成 now，任何早于 now 的回填/时钟偏移证据都会被静默跳过）
 
 ## API（ctx.acp）
 
 | 方法 | 说明 |
 |---|---|
-| `append(input)` | 写入证据（过写入闸门 + 资格矩阵；内容重复则返回已存在的 id） |
+| `append(input)` | 写入证据（过写入闸门 + 资格矩阵；内容重复则返回已存在的 id）。**摄入闸门（2026-09-22，B1）**：需显式声明 `input.ingest`——`'session-event'`（session/event 摄入路径）/ `'user-correction'`（`correct` 快路径）过闸门后按写入闸门结论落 state；**未声明与其它来源一律落 `quarantined`**（公开服务面 fail-closed，账本 append-only 删不掉；已隔离行不注入，`release(id)` 可放行）。`ingest` 不是 evidence 列，落库前剔除 |
 | `get(id)` / `inspect(id)` | 读单条（inspect 附带治理裁决细节） |
 | `setState(id, state, opts)` | 状态迁移（正常/隔离/已取代/已脱敏） |
 | `recall({query, scopeId, targetDomain, validAt, allowSuperseded, maxTokens})` | 召回（编排的最小入口；validAt 支持历史视图）。`targetDomain` 参数 DEPRECATED（2026-09-07）：资格按候选自身 claimDomain 裁决 |

@@ -161,7 +161,19 @@ subagent: config.subagentDowngrade === true && session?.header?.origin === "suba
 3. 新流量的 agent 自产占比（当前 85.6%）应显著下降；
 4. 跨会话 20 条召回窗里 agent 自述的占比（当前 20/20）。
 
-## 6. 待拍板
+## 6. 定案（2026-09-22，用户拍板）
+
+| 项 | 决定 | 落地 |
+|---|---|---|
+| C（session_type） | **直接做** | `extract.sessionTypeOf()` + `index.mjs` 接线 |
+| A | **取 A1**（只收 `assistant/`） | `WORTHY_PREFIXES` 移除 `assistant/`；`tool/` 暂留待议 |
+| B | **取 B1**（append 补闸门） | `service.mjs`：未声明 `ingest` 的直写一律 `quarantined` |
+
+B1 的影响面已核实：全机 16 个已安装插件里，只有 `dsh-context-maid` 调用 `ctx.acp`（`rg -l` 零其它命中），
+所以第三方直写方目前仅一家。落地后 maid 的归档**仍然记录**（不丢审计），但缺省落 `quarantined`、不注入；
+若确认要可召回，应改走 `upsertObservation`（与其 design.md 的原意一致），而不是放宽闸门。
+
+## 7. 遗留待拍板
 
 1. **A1 的边界**：是否连 `tool/result` 一起收？（`assistant/` 建议直接收，`tool/` 建议单列。）
 2. **B 的归属**：`acp.append` 要不要承担摄入判据——这是公共契约变更，且 maid 侧还有第二种解法（B2）。
