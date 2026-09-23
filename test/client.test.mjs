@@ -29,19 +29,27 @@ test('built client plugin activates with its declared Cordis services', async (t
     return { createElement() {}, useState() {}, useSyncExternalStore() {} }
   })
 
-  const negativeCtx = new Context()
-  t.after(() => negativeCtx.fiber.dispose())
-  await provideClientServices(negativeCtx)
-  await assert.rejects(
-    async () => { await negativeCtx.plugin({ apply: plugin.apply }) },
-    /cannot get property "settingsScope" without inject/,
-  )
-
+  // 0.1.6 路径：settingsScope 在 → 卡片照旧注册，条目激活
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
   await provideClientServices(ctx)
   await ctx.plugin(plugin)
-  assert.deepEqual([...plugin.inject], ['slots', 'settingsScope'])
+  assert.deepEqual([...plugin.inject], ['slots'])
+
+  // 0.1.7 路径：settingsScope 已被平台删除 → 条目必须照常激活、不注册卡片、绝不抛错
+  const newCtx = new Context()
+  t.after(() => newCtx.fiber.dispose())
+  let registered = 0
+  await newCtx.plugin({
+    apply(provider) {
+      provider.provide('slots', {
+        inject(_name, register) { return register() },
+        register() { registered += 1; return () => {} },
+      })
+    },
+  })
+  await newCtx.plugin({ apply: plugin.apply })
+  assert.equal(registered, 0, '没有 settingsScope 时不应注册设置卡片')
 })
 
 test('settings section explains that blank fields fall back to plugin defaults', async (t) => {

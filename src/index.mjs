@@ -360,6 +360,9 @@ export function apply(ctx, config = {}) {
   // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
   // 字段与 Config 同源但独立 schema：设置页写 settings.yaml，apply 时 mergeSettingsIntoConfig 覆盖。
   ctx.inject(['settings'], (settingsCtx) => {
+    // dsh >= 0.1.7（#4587）移除了 settings.register：无守卫时这里会抛错。
+    // 抛错被 cordis 吞掉、不影响 apply 主体，但会污染启动诊断 —— 无 register 即跳过。
+    if (typeof settingsCtx.settings?.register !== 'function') return
     settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
       ledgerDir: z.string(),
       hotTokens: z.number().step(1).min(1),
@@ -754,7 +757,7 @@ export function apply(ctx, config = {}) {
       } catch { /* 观测失败不影响注入 */ }
       const ours = createUserMessage({
         content: [{ type: 'text', text: body }],
-        source: { kind: 'plugin', plugin: 'dsh-adaptive-context', form: 'recall' },
+        source: { kind: 'plugin:dsh-adaptive-context', form: 'recall' },
       })
       return { kind: 'enter', messages: [...decision.messages, ours] }
     } catch (err) {

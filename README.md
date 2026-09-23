@@ -65,6 +65,8 @@ DSH 会话事件
               └─ 候选状态机 → 物化视图（pre-step 注入时读取）
 ```
 
+注入的召回消息以 `source.kind: plugin:dsh-adaptive-context` 标记生产者，并保留 `form: recall` 供会话审计。
+
 ## Agent 安装指南（面向自动化装配）
 
 > 给需要在本机 dsh 装配本插件的 agent/脚本读；人工安装见下一节。

@@ -172,8 +172,8 @@ test('callLlmText：注入消息 source 不自造 form（表外值会让会话�
   const llm = recordingLlm(() => okStream('ok'))
   await callLlmText(llm, { provider: 'deepseek', model: 'chat' }, 'u', 's')
   const source = llm.calls[0].messages[0].source
-  assert.equal(source.kind, 'plugin')
-  assert.equal(source.plugin, 'dsh-adaptive-context')
+  assert.equal(source.kind, 'plugin:dsh-adaptive-context')
+  assert.equal(source.plugin, undefined)
   assert.equal(source.form, undefined, 'form 是官方词表，自造值禁止')
 })
 
