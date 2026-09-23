@@ -14,6 +14,8 @@
 //     （本地读侧解析不到那些 ev_* 会当作证据缺失；留着比清掉更误导）
 //   - `authority` 原样保留（**不提升**：协议 §3.3）
 //   - 溯源写进同目录的 <in>.manifest.json（源文件、源机、被导入的 id 列表、时间）
+//     **并且**额外落一份带时间戳的副本 <in>.manifest-<ts>.json —— 因为同名 manifest 会被**下一次**
+//     （往往是无新行的）运行覆盖成 count:0，ledger-release 的放行依据会因此被抹掉（2026-09-23 真实踩到）。
 //
 // 去重（两道）：
 //   a) id 命中 → importJsonl 自己 skipped
@@ -138,15 +140,21 @@ function main() {
     out.skippedById = res.skipped
     out.errors = res.errors.slice(0, 5)
     const manifest = opts.inFile + '.manifest.json'
-    writeFileSync(manifest, JSON.stringify({
+    const manifestBody = JSON.stringify({
       importedAt: new Date().toISOString(),
       from: opts.from,
       source: opts.inFile,
       db: out.db,
       count: res.inserted,
       ids: keep.map((o) => o.data.id),
-    }, null, 1), 'utf8')
+    }, null, 1)
+    writeFileSync(manifest, manifestBody, 'utf8')
+    // 历史留存（2026-09-23）：同名 manifest 会被下一次无新行的运行覆盖成 count:0，
+    // 于是 ledger-release 再也看不到可放行的 id。带时间戳的副本让放行/审计有据可依。
+    const stamped = manifest.replace(/\.json$/, '-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json')
+    writeFileSync(stamped, manifestBody, 'utf8')
     out.manifest = manifest
+    out.manifestStamped = stamped
     console.log(JSON.stringify(out, null, 1))
   } finally {
     ledger.close?.()
