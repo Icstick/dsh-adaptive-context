@@ -38,6 +38,7 @@
 | ACP-B16 | ✅ 2026-09-12 | 注入陈旧度与抖动治理（unresolved ②③，用户拍板：① observation 时间衰减参数 ② C3 迟滞带） | ① `observationHalfLifeDays`（默认 30 天，decay=0.5^(ageDays/halfLife)，**仅 observation 轨**——evidence 是事实不老化）② `injectionHysteresis`（默认 0.2，上一步注入集候选 ×(1+h) 粘性加成，抑制相邻 step 抖动）；两者 0=关闭 | ✅ 完成 `b7942eb`（测试 429/429、lint 0/0、depcruise 0 违规）；生产 profile 已显式写出两键，待重启生效 |
 | ACP-B17 | P1 | `MAX_EVENT_TEXT_CHARS=4000` 的 4 处截断是**静默**的——账本里 100 行 content 长度**恰好 4000**，无任何标记，下游无法区分「原文就这么长」与「被砍了」（2026-09-21 复核 P1-4.2） | `extract.mjs` 新增 `clampText()`，超限追加 `…[truncated N chars]`（措辞与 `consolidate.mjs:164` 既有一致），4 处 slice 全改走它；标记进正文故 contentHash 随之变化 | ✅ 完成 `a3efb0a`（测试 449/449、lint 0/0、depcruise 0 违规） |
 | ACP-B18 | ✅ 2026-09-24（**ACP 侧已落地**） | 「candidate 催办入口」——把待办 candidate 同步进 WorkState 的 next_steps。绑定设计已定：工作区 docs/plans/sync-boundary-protocol-20260922.md §7（导出=ACP 只读 → 传输=weaver 通道 → 写入=WC 唯一写者 → 回流=不做）。**本轮做掉 ACP 侧**：scripts/candidate-export.mjs（只读导出 pending candidate → JSONL，含 [acp:<id>] hint 前缀供 WC 判重、只给 evidenceId 不给正文），6 例测试（含「只读」双确认 + 幂等 + 空表安全）；全量 573 绿 / lint 0 / depcruise 0。WC 侧的拉取写入属另一仓，未在本轮。 |
+| ACP-B19 | P2 | Dreaming 候选的**判据**偏松：51 条 consensus 里可导出 5 条，其中 4 条是「进度快照 / 状态通报」（「当前在做 X」这类会随每次压缩反复出现，故复现次数很高）。**复现次数 != 价值**，与「会话→skills」线被否掉的原因同构 | 加一道**时态过滤**（含「当前/已/正」等进度标记的候选降权或挡下），或把「进度快照」类候选的**归宿改成 WorkState**（本就是干这个的）。判据改好前**不要批量 import** | 待做（判据未定；已记入 docs/design/DREAMING.md 13.5） |
 
 ## 已收口（近期）
 
