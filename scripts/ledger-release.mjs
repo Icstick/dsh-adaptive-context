@@ -20,6 +20,7 @@ import path from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { resolveDshHome } from '../src/home.mjs'
+import { gateVerdict } from '../src/release-gate.mjs'
 
 export function parseArgs(argv) {
   const a = {}
@@ -38,6 +39,7 @@ export function parseArgs(argv) {
     sample: Number(a.sample ?? 12),
     revoke: a.revoke || '',
     allowNoise: a['allow-noise'] === '1' || a['allow-noise'] === 'true',
+    softPass: a['soft-pass'] === '1' || a['soft-pass'] === 'true',
     apply: a.apply === '1' || a.apply === 'true',
   }
 }
@@ -83,15 +85,21 @@ function main() {
     const inScope = pending.filter((r) =>
       (!opts.domains || opts.domains.includes(r.claim_domain)) &&
       (!opts.authorities || opts.authorities.includes(r.authority)))
-    // 质量闸门：默认开（--allow-noise 可关，用于「我知道这批次脏、但我要它」的场合）
-    const rejects = []
-    const passed = opts.allowNoise ? inScope : inScope.filter((r) => {
-      const why = qualityVerdict(r)
-      if (why) { rejects.push({ why, id: r.id, subject: r.subject, text: String(r.text).slice(0, 50) }); return false }
-      return true
-    })
-    const byReject = {}
-    for (const x of rejects) byReject[x.why] = (byReject[x.why] ?? 0) + 1
+    // 质量闸门：默认开（--allow-noise 可关，用于「我知道这批次脏、但我要它」的场合）。
+    // 2026-09-24 第二批：判据搬到 src/release-gate.mjs（七类 + 三档）。三档语义：
+    //   pass            → 放行
+    //   soft_tag        → **默认不放行**（漏放会污染所有下游机，误杀只花审核工时）→ --soft-pass 可放
+    //   hard_quarantine → 不放行，留在隔离区（= 人工队列）
+    const judged = inScope.map((r) => ({ r, v: gateVerdict(r) }))
+    const hardRows = opts.allowNoise ? [] : judged.filter((x) => x.v.decision === 'hard_quarantine')
+    const softRows = opts.allowNoise ? [] : judged.filter((x) => x.v.decision === 'soft_tag')
+    const passed = opts.allowNoise
+      ? judged.map((x) => x.r)
+      : judged.filter((x) => x.v.decision === 'pass' || (opts.softPass && x.v.decision === 'soft_tag')).map((x) => x.r)
+    const byHard = {}, bySoft = {}
+    for (const x of hardRows) byHard[x.v.class] = (byHard[x.v.class] ?? 0) + 1
+    for (const x of softRows) bySoft[x.v.class] = (bySoft[x.v.class] ?? 0) + 1
+    const fmt = (x) => '[' + x.v.class + '] ' + x.r.from + '/' + x.r.claim_domain + ' · ' + x.r.subject + ' · ' + String(x.v.evidence_span).slice(0, 40) + (x.v.tags.length ? ' · #' + x.v.tags.join(',') : '')
     const byDomain = {}, byAuthority = {}, byFrom = {}
     for (const r of passed) {
       byDomain[r.claim_domain] = (byDomain[r.claim_domain] ?? 0) + 1
@@ -101,10 +109,14 @@ function main() {
     const out = {
       mode: opts.apply ? 'APPLY' : 'DRY-RUN',
       db: path.join(opts.dir, 'acp-ledger.db'),
-      qualityGate: opts.allowNoise ? 'OFF (--allow-noise)' : 'ON',
-      rejectedByGate: rejects.length,
-      byReject,
-      rejectSample: rejects.slice(0, 6),
+      qualityGate: opts.allowNoise ? 'OFF (--allow-noise)' : 'ON · 七类判据 src/release-gate.mjs',
+      softPolicy: opts.softPass ? '放行（--soft-pass）' : '不放行（进人工队列；--soft-pass 可放）',
+      rejectedByGate: hardRows.length,
+      byReject: byHard, // 兼容旧字段名；内容改为新类名（english/selfref/ephemeral/env-bound/one-shot-path/stale-version/empty-emotion）
+      rejectSample: hardRows.slice(0, 6).map(fmt),
+      softHeld: opts.softPass ? 0 : softRows.length,
+      bySoft,
+      softSample: softRows.slice(0, 6).map(fmt),
       manifests: opts.manifests,
       domains: opts.domains ?? '(全部)',
       authorities: opts.authorities ?? '(全部)',
@@ -120,7 +132,17 @@ function main() {
       for (const r of passed) n += Number(stmt.run(r.id).changes)
       out.released = n
       const f = path.join(path.dirname(opts.manifests[0]), 'released-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.json')
-      writeFileSync(f, JSON.stringify({ releasedAt: new Date().toISOString(), domains: opts.domains, authorities: opts.authorities, qualityGate: out.qualityGate, rejected: rejects.length, ids: passed.map((r) => r.id) }, null, 1), 'utf8')
+      writeFileSync(f, JSON.stringify({
+        releasedAt: new Date().toISOString(),
+        domains: opts.domains,
+        authorities: opts.authorities,
+        qualityGate: out.qualityGate,
+        softPolicy: out.softPolicy,
+        rejected: hardRows.length,
+        softHeld: softRows.length,
+        ids: passed.map((r) => r.id),
+        heldIds: [...hardRows, ...(opts.softPass ? [] : softRows)].map((x) => x.r.id),
+      }, null, 1), 'utf8')
       out.releaseList = f
     }
     console.log(JSON.stringify(out, null, 1))
@@ -129,27 +151,12 @@ function main() {
   }
 }
 
-// ===================== 质量闸门（S3 第二批前加的；见 docs/ops/s3-batch1-release-*.md §3）=====================
-// 背景：第一批放行后抽样发现 4.2% 噪声，分三类。闸门只拦这三类，别的一律放行（不过度设计）。
-//   EPHEMERAL  —— 会话临时态被蒸成持久事实（"用户同意继续当前任务"是典型）
-//   SELFREF    —— 主语是机器（user / assistant / user-xxx），不是用户
-//   EN_ONLY    —— 整条无中文且偏长，多半是模型用英文写的转述
-export const EPHEMERAL_RE = /同意继续|已重启|正在|先试|本轮|本次|当前会话|当前任务|刚刚|刚才|目前已|已安装完成|已处理完|待办已/
-export const SELFREF_SUBJECT_RE = /^(user|assistant|agent|session|subagent|tool)\b|^user-|^assistant-|^session-/i
-export function isEnglishOnly(text) {
-  const t = String(text ?? '')
-  return !/[\u4e00-\u9fff]/.test(t) && t.trim().length > 12
-}
-
-/** @returns {string|null} 拒绝原因；null = 通过 */
-export function qualityVerdict(row) {
-  const text = String(row.text ?? '')
-  const subject = String(row.subject ?? '')
-  if (SELFREF_SUBJECT_RE.test(subject)) return 'selfref-subject'
-  if (EPHEMERAL_RE.test(text)) return 'ephemeral'
-  if (isEnglishOnly(text)) return 'english-only'
-  return null
-}
+// ===================== 质量闸门（第二批起搬到 src/release-gate.mjs）=====================
+// 旧实现是这里的三个正则一票否决（见 docs/ops/s3-batch1-release-20260922.md §4.5）。
+// 2026-09-24 第二批按云端判据（docs/plans/cloud-batch-2-20260923.md 任务 2）重写为
+// 七类 + 三档，实现与阈值集中在 src/release-gate.mjs；这里只做**转出**，
+// 保持旧导入路径不变（test 与运维脚本仍从 scripts/ledger-release.mjs 取这两个符号）。
+export { qualityVerdict, isEnglishOnly, SELFREF_SUBJECT_RE, gateVerdict, GATE_CONFIG } from '../src/release-gate.mjs'
 
 const isMain = (() => {
   if (!process.argv[1]) return false
