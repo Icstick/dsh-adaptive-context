@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { openEvidenceLedger } from '../src/store.mjs'
 import { parseArgs as parseReview, reviewCandidates, renderList } from '../scripts/dream-review.mjs'
 import {
-  parseArgs as parseExport, deriveTitle, provenanceFooter, toWeaverRecord, buildExport,
+  parseArgs as parseExport, deriveTitle, provenanceFooter, toWeaverRecord, buildExport, looksEphemeral,
   EXPORTABLE_DOMAINS, BLOCKED_DOMAINS,
 } from '../scripts/dream-export.mjs'
 
@@ -154,3 +154,29 @@ test('buildExport：blocked 的 reason 区分「画像域」与「不在白名�
   assert.ok(!/画像域/.test(String(byId.cm_e)))
 })
 
+
+test('looksEphemeral：只认「第一人称进行时」，不误杀以「已」开头的真知识（ACP-B19）', () => {
+  // 该降权的：进度快照 / 状态通报（2026-09-24 实测样本）
+  for (const s of [
+    '当前在 dsh-desktop-shell 的某分支上先做提交；需排查右上角 unavailable',
+    '已读完三份报告并认可质量，正复现 git-guardrails 串行描述 bug',
+    '正在复现 git-guardrails 串行描述 bug',
+  ]) assert.equal(looksEphemeral(s), true, '应降权: ' + s)
+  // 不该碰的：真知识（尤其「已确认 X 是 Y」这种以「已」开头的结论）
+  for (const s of [
+    'Plugin bundle structure is package.json + cordis.patch.yml',
+    '已确认 Node 的 zstdDecompressSync 只解第一帧',
+    'Node 的 zstdDecompressSync 只解第一帧，必须用 CLI 流式解',
+    '',
+  ]) assert.equal(looksEphemeral(s), false, '不得降权: ' + s)
+  assert.equal(looksEphemeral(null), false)
+})
+
+test('toWeaverRecord：进度快照降权 0.2 且带 ephemeral 标签，真知识不受影响', () => {
+  const eph = toWeaverRecord(CAND({ text: '当前在 dsh-desktop-shell 的某分支上先做提交', occurrences: 5 }))
+  assert.ok(eph.tags.includes('ephemeral'))
+  assert.equal(eph.confidence, 0.7, '0.9 - 0.2')
+  const real = toWeaverRecord(CAND({ text: 'Plugin bundle structure is package.json', occurrences: 5 }))
+  assert.ok(!real.tags.includes('ephemeral'))
+  assert.equal(real.confidence, 0.9)
+})

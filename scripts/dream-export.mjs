@@ -28,6 +28,30 @@ export const EXPORTABLE_DOMAINS = Object.freeze(['work', 'external_fact'])
 /** 不允许出 ACP 的域（显式写出来，免得后来人以为漏了） */
 export const BLOCKED_DOMAINS = Object.freeze(['user_preference', 'user_fact', 'style'])
 
+/**
+ * 「进度快照」形态（ACP-B19，2026-09-24）。
+ * 实测：consensus 51 条里可导出 5 条，其中 4 条是「进度快照 / 状态通报」——例如
+ * 「当前在 dsh-desktop-shell 的某分支上先做提交…」「已读完三份报告…正复现…」。
+ * 根因：Dreaming 按**复现次数**聚合，而「当前在做 X」天然会反复出现（每次压缩/交接都重提一次），
+ * 于是复现次数很高、内容却是一次性的。**复现次数 != 价值**。
+ *
+ * 处置：**降权而不挡下**（只标注 + 降 confidence）—— 判据宁可漏也不要误杀：
+ * 「已确认 X 只解第一帧」这类以「已」开头的**真知识**不能被牵连，所以只认「第一人称进行时」这一种最明确的形态。
+ */
+export const EPHEMERAL_PATTERNS = Object.freeze([
+  /^(当前|目前|现在)(在|正在|已经|已)/,
+  /^(正在|刚|刚刚)(做|跑|读|改|写|复现|排查|处理|提交)/,
+  /^(已|刚)(读完|看了|完成|跑完|复现)/,
+])
+
+/** @returns {boolean} true = 像「进度快照」，导出时降权 */
+export function looksEphemeral(text) {
+  const t = String(text ?? '').trim()
+  if (!t) return false
+  return EPHEMERAL_PATTERNS.some((re) => re.test(t))
+}
+
+
 export function parseArgs(argv) {
   const a = {}
   for (let i = 0; i < argv.length; i += 1) {
@@ -72,13 +96,16 @@ export function provenanceFooter(c, minEvidence = 12) {
 /** 候选 → wv import 记录（纯函数，可测） */
 export function toWeaverRecord(c, opts = {}) {
   const text = String(c.text ?? '').trim()
-  const conf = c.occurrences >= 3 ? 0.9 : c.occurrences === 2 ? 0.8 : 0.7
+  let conf = c.occurrences >= 3 ? 0.9 : c.occurrences === 2 ? 0.8 : 0.7
+  // ACP-B19：进度快照降权（不挡下）—— 标注 + 减 confidence，让人一眼看出该复核
+  const ephemeral = looksEphemeral(text)
+  if (ephemeral) conf = Math.max(0.5, Number((conf - 0.2).toFixed(2)))
   const rec = {
     title: deriveTitle(text, c.subject),
     summary: text.slice(0, 200),
     body: text + provenanceFooter(c),
     source: 'acp-dreaming:' + c.id,
-    tags: ['acp-dreaming', c.claimDomain],
+    tags: ephemeral ? ['acp-dreaming', c.claimDomain, 'ephemeral'] : ['acp-dreaming', c.claimDomain],
     confidence: conf,
   }
   if (opts.lib) rec.library = opts.lib
