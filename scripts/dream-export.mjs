@@ -144,6 +144,10 @@ export function toStagingRecord(c, rec) {
   return {
     schema: 'dsh.acp.candidate/v1',
     candId: c.id,
+    // ★ 跨机复现的判据用 subject 而不是 candId（2026-09-24 修正）：
+    //   candId = hash(scopeId|claimDomain|subject|observationIds)，而 observationIds 是**各机本地的**，
+    //   所以同一件事在三机算出的是**不同的 id** —— 拿 id 比对永远算不出「跨机复现」。
+    subject: c.subject ?? null,
     claimDomain: c.claimDomain ?? null,
     title: rec.title,
     summary: rec.summary,
