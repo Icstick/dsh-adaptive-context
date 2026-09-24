@@ -6,7 +6,7 @@
 
 dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。核心 = 跨会话**证据账本**（append-only SQLite）+ 治理（authority 分级）+ pre-step **Context Composer** 注入 + **Profile 用户画像** + **Dreaming 离线巩固**。用户通过它把「事实/偏好/纠正」沉淀为跨会话记忆，注入预算受三级承诺约束（MVP≤900 / v0.1≤1200 tokens/step）。
 
-当前账本 schema **v7**；全量测试 **516 例**（`node --test "test/*.test.mjs"`）。
+当前账本 schema **v7**；全量测试 **549 例**（`node --test "test/*.test.mjs"`）。
 
 ## 结构地图
 
