@@ -138,3 +138,19 @@ test('端到端：dreaming → 人工审 → 导出（weaver 侧零写入）', (
   assert.equal(blocked[0].domain, 'user_preference')
   ledger.close()
 })
+
+test('buildExport：blocked 的 reason 区分「画像域」与「不在白名单」（2026-09-24）', () => {
+  const mk = (domain, id) => CAND({ id, claimDomain: domain })
+  const { records, blocked } = buildExport([
+    mk('user_preference', 'cm_p'),
+    mk('experience', 'cm_e'),
+    mk('work', 'cm_w'),
+  ])
+  assert.equal(records.length, 1, '只有 work 域出得去')
+  assert.equal(blocked.length, 2)
+  const byId = Object.fromEntries(blocked.map((b) => [b.id, b.reason]))
+  assert.match(byId.cm_p, /画像域/)
+  assert.match(byId.cm_e, /白名单/, 'experience 只是不在白名单，不该被说成画像域')
+  assert.ok(!/画像域/.test(String(byId.cm_e)))
+})
+
