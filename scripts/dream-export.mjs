@@ -65,6 +65,7 @@ export function parseArgs(argv) {
     state: a.state || 'approved',
     lib: a.lib || '',
     out: a.out || '',
+    cloudOut: a['cloud-out'] || '',
     limit: Number(a.limit || 0) || 0,
     json: a.json === '1' || a.json === 'true',
   }
@@ -134,6 +135,37 @@ export function buildExport(candidates, opts = {}) {
   return { records, blocked }
 }
 
+/**
+ * 候选 → **云端 staging 记录**（DREAMING §11 通道的入口格式，2026-09-24）。
+ * 与 toWeaverRecord 的区别：那个是「给 wv import 的记录」，这个是「给云端接纳器的记录」。
+ * 候选**还没有 lib** —— 那是精馏要决定的事，所以这里不猜、不填。
+ */
+export function toStagingRecord(c, rec) {
+  return {
+    schema: 'dsh.acp.candidate/v1',
+    candId: c.id,
+    claimDomain: c.claimDomain ?? null,
+    title: rec.title,
+    summary: rec.summary,
+    body: rec.body,
+    source: rec.source,
+    tags: rec.tags,
+    confidence: rec.confidence,
+  }
+}
+
+/** 组装 staging 文件正文：首行 manifest + 每行候选（与 wv-sync 的 inbound 同构，但走**独立通道**） */
+export function toStagingPayload(records, deviceId, exportedAt) {
+  const man = {
+    schema: 'dsh.acp.staging/v1',
+    deviceId: deviceId || 'unknown',
+    exportedAt: exportedAt || new Date().toISOString(),
+    count: records.length,
+  }
+  const NL = String.fromCharCode(10)
+  return [JSON.stringify(man), ...records.map((r) => JSON.stringify(r))].join(NL) + NL
+}
+
 const isMain = (() => {
   if (!process.argv[1]) return false
   return path.resolve(process.argv[1]).endsWith(path.join('scripts', 'dream-export.mjs'))
@@ -155,6 +187,17 @@ function main() {
     }
     console.log('  可导出 ' + records.length + ' 条，挡下 ' + blocked.length + ' 条')
     const jsonl = records.map((r) => JSON.stringify(r)).join('\n')
+    if (opts.cloudOut) {
+      // 用 source 反查候选：buildExport 会挡掉不合规的，索引与 res.items 并不一一对应
+      const byId = new Map(res.items.map((x) => [x.id, x]))
+      const staging = records.map((r) => {
+        const id = String(r.source || '').replace('acp-dreaming:', '')
+        return toStagingRecord(byId.get(id) || { id }, r)
+      })
+      writeFileSync(opts.cloudOut, toStagingPayload(staging, opts.deviceId || '', opts.exportedAt || ''), 'utf8')
+      console.log('[export] 已写 staging 格式 ' + opts.cloudOut + '（' + staging.length + ' 条，供云端接纳器）')
+      console.log('[export] 下一步：scp 到 <weaver>/inbound-acp/<slot>/ 后跑 wv-staging-accept.mjs')
+    }
     if (opts.out) {
       writeFileSync(opts.out, jsonl + '\n', 'utf8')
       console.log('[export] 已写 ' + opts.out)
