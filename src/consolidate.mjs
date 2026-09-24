@@ -29,6 +29,7 @@ import {
 } from './constants.mjs'
 import { PENDING_PROMOTION } from './expression.mjs'
 import { isActionFlowObservation } from './governance.mjs'
+import { machineTemplateOf } from './ingest-noise.mjs'
 
 // ===================== 源头过滤（P0，2026-09-09） =====================
 
@@ -41,6 +42,11 @@ import { isActionFlowObservation } from './governance.mjs'
  * @returns {boolean}
  */
 export function isConsolidationSkippable(ev, skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE) {
+  // 机器模板永不蒸馏（2026-09-24）：这一道**不受开关控制** —— 它不是「省配额」，
+  // 而是「这类文本根本不该变成关于用户的结论」（实测：子代理任务书被蒸成"用户的要求"）。
+  // 覆盖历史漏网：命中集里 T1a 的 user_correction / T1c 的 user_explicit 正是绕过下面
+  // agent_authored+experience 判据进来的。
+  if (machineTemplateOf(ev?.content)) return true
   if (!skipAgentExperience) return false
   return ev?.sourceClass === 'agent_authored' && ev?.claimDomain === 'experience'
 }

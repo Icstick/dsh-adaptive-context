@@ -13,6 +13,7 @@
 
 import { hashHex } from './constants.mjs'
 import { agentAuthoredAuthority } from './governance.mjs'
+import { machineTemplateOf } from './ingest-noise.mjs'
 
 /**
  * 可摄入的 DSH session event 类型前缀/名称（兜底白名单）。
@@ -333,6 +334,9 @@ export function claimDomainOf(event) {
 export function toEvidenceCandidate(event, opts = {}) {
   if (!isEvidenceWorthy(event)) return null
   const text = extractText(event)
+  // 机器模板不摄入（2026-09-24）：源头拦截。判据固定在 src/ingest-noise.mjs，
+  // 只做前缀 / 整行锚定匹配 —— 子串会误伤「引用模板串的分析文」。
+  if (machineTemplateOf(text)) return null
   const sc = sourceClassOf(event)
   // sourceRef：真实 DSH 事件有 seq（session 内唯一）无 id；synthetic 测试事件有 id
   const eventRef = opts.sessionId && event.seq != null
