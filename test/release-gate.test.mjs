@@ -55,6 +55,9 @@ test('③ 会话临时态：S6 单族即硬；云端 S 族需 ≥2 族；锚点�
   assert.equal(d({ text: '之前那个 ECONNRESET 在生产出现，根因是连接池 max=5 太小，已把 max 调到 50（commit a1b2c3d）' }), 'pass')
   // 单族无锚点 → soft（进人工队列，不静默丢）
   assert.equal(d({ text: '用户计划稍后讨论 memory 是否保留' }), 'soft_tag')
+  // 跨机复评校准（B 机隔离区实测漏放）：只说「当前会话…」，是会话临时态
+  assert.equal(cls({ text: '用户询问服务器怎么样了，表明当前会话涉及服务器侧状态跟进。' }), 'ephemeral')
+  assert.equal(d({ text: '图片处理已在其他会话处理，当前会话这边可以不管。' }), 'soft_tag')
   // 本机校准：S6 刻意不收「本次已」，避免误杀有效工作事实
   assert.equal(d({ text: '复制 systemd unit 并修改 WORKER_ID 即可；本次已确认扩容到 4 个 cloud worker' }), 'soft_tag')
   // 锚点豁免：hard 降 soft
