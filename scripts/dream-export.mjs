@@ -90,7 +90,17 @@ export function buildExport(candidates, opts = {}) {
   const records = []
   const blocked = []
   for (const c of candidates) {
-    if (!EXPORTABLE_DOMAINS.includes(c.claimDomain)) { blocked.push({ id: c.id, domain: c.claimDomain }); continue }
+    if (!EXPORTABLE_DOMAINS.includes(c.claimDomain)) {
+      // 2026-09-24：原先 block 不带 reason，输出层用「画像域」兜底 → 把 experience 这类
+      // 「只是不在白名单」的域误标成画像域（实测 46 条里大半是 experience）。这里把两种原因分开。
+      const isProfile = BLOCKED_DOMAINS.includes(c.claimDomain)
+      blocked.push({
+        id: c.id,
+        domain: c.claimDomain,
+        reason: isProfile ? '画像域，永不出 ACP' : '不在导出白名单（仅 work / external_fact）',
+      })
+      continue
+    }
     if ((c.evidenceIds ?? []).length === 0) { blocked.push({ id: c.id, domain: c.claimDomain, reason: '无证据回链' }); continue }
     records.push(toWeaverRecord(c, opts))
   }
@@ -114,7 +124,7 @@ function main() {
     console.log('[export] state=' + opts.state + '  匹配 ' + res.total + ' 条'
       + (opts.lib ? '  --lib ' + opts.lib : '  （未给 --lib，导入时需 wv import --lib <lib>）'))
     for (const b of blocked) {
-      console.log('  [挡下] ' + b.domain + (b.reason ? '（' + b.reason + '）' : '（画像域，永不出 ACP）') + '  ' + b.id)
+      console.log('  [挡下] ' + b.domain + '（' + (b.reason || '被挡下') + '）  ' + b.id)
     }
     console.log('  可导出 ' + records.length + ' 条，挡下 ' + blocked.length + ' 条')
     const jsonl = records.map((r) => JSON.stringify(r)).join('\n')
