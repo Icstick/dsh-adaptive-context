@@ -26,7 +26,7 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `test/*.test.mjs` —— node:test 测试（每个 src 模块有对应测试）
 - `client/` + `lib/client.js` + `scripts/build-client.mjs` —— Web 设置页（改后需 build:client）
 - `cordis.patch.yml` —— bundle 装配补丁
-- `scripts/` —— **运维/离线脚本**（不在运行时链路上）：`ledger-audit.mjs`（只读账本体检，含画像段/候选池/冷存）、`ledger-quarantine-candidates.mjs` + `ledger-quarantine-apply.mjs`（存量隔离候选与执行器，默认 dry-run）、`dream.mjs`（离线巩固运行器）、`dream-review.mjs`（候选池人工审）、`dream-export.mjs`（候选 → weaver JSONL）、`build-client.mjs`、`ledger-import.mjs` + `ledger-release.mjs`（跨机 observation 的导入与放行；**放行闸门的判据与阈值都在 `src/release-gate.mjs`**，七类 + 三档，要改闸门改那里而不是改脚本）、`ledger-profile-doc.mjs`（从账本生成**人读画像** USER.md；M2/P3）
+- `scripts/` —— **运维/离线脚本**（不在运行时链路上）：`ledger-audit.mjs`（只读账本体检，含画像段/候选池/冷存）、`ledger-quarantine-candidates.mjs` + `ledger-quarantine-apply.mjs`（存量隔离候选与执行器，默认 dry-run）、`dream.mjs`（离线巩固运行器）、`dream-review.mjs`（候选池人工审）、`dream-export.mjs`（候选 → weaver JSONL）、`build-client.mjs`、`ledger-import.mjs` + `ledger-release.mjs`（跨机 observation 的导入与放行；**放行闸门的判据与阈值都在 `src/release-gate.mjs`**，七类 + 三档，要改闸门改那里而不是改脚本）、`ledger-profile-doc.mjs`（从账本生成**人读画像** USER.md；M2/P3）、`ledger-quarantine-cascade.mjs`（**隔离级联**：把「源证据全被隔离且文本是过程噪声」的 observation 也标 quarantined；默认 dry-run，写前整库备份）
 - `docs/design/DREAMING.md` —— **Dreaming / Profile 设计与实测记录**（§10 weaver 通道、§11 云端 staging、§12 Profile）
 - `docs/adr/` —— 架构决策记录（只追加，见 ADR-README）
 - `.github/PULL_REQUEST_TEMPLATE.md` —— PR 模板（含架构影响栏）
