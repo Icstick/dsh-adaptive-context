@@ -21,7 +21,7 @@ import path from 'node:path'
 import { existsSync, writeFileSync } from 'node:fs'
 import { resolveDshHome } from '../src/home.mjs'
 import { DEFAULT_DB_NAME } from '../src/constants.mjs'
-import { openEvidenceLedger } from '../src/store.mjs'
+import { openEvidenceLedger, deriveObservationAuthority } from '../src/store.mjs'
 
 /** 允许导出的域（方案 4 的白名单）。画像三域**永不**在内。 */
 export const EXPORTABLE_DOMAINS = Object.freeze(['work', 'external_fact'])
@@ -55,6 +55,134 @@ export function looksEphemeral(text) {
   return EPHEMERAL_PATTERNS.some((re) => re.test(t))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 判据 A：跨域配对（2026-09-25）—— 禁止域内复述进 staging
+// ---------------------------------------------------------------------------
+// 依据：*Discovery by Dreaming*（https://arxiv.org/abs/2607.16256）与
+//       *Language Models Need Sleep*（https://arxiv.org/abs/2606.03979）：
+//       **跨域重组有价值，域内复述没有价值**。
+//   · 符号臂：域内复述（单一 field 内的跨 subfield 重放）增益近零；跨域才出正向效应。
+//     （注：该文 v2 已**撤回** 85.7%/64.3% (+21pp) 这一头条数字——那对数字来自
+//      三个模型各自的生成+自评，不是三个判官；引用时应以撤回后的结论为准。）
+//   · 神经臂：跨域迁移子任务 +14.5 pp（GSM8K，rank=256，p≈0.005）；匹配条件下域内巩固
+//     为 null effect（−1.8±4.4 pp）。
+//
+// 落地：候选的**支撑域集合** >= CROSS_DOMAIN_MIN 才允许进 staging。
+//   支撑域 = 候选自身 claimDomain ∪ 其全部支撑证据的 claimDomain。
+//   取并集是**松**的一侧：真跨域（证据本身跨域、或结论跨到了另一个域）都不会被误杀；
+//   被挡下的只有「结论域与证据域完全同一个域」的纯域内复述。
+//
+// 预期副作用（本改动的目的之一）：「进度快照 / 状态通报」（「当前在做 X」）复现次数天然很高
+//   （每次压缩/交接都重提一次），但它们的支撑证据始终落在同一个域 → 自然掉出候选池。
+//   **复现次数 != 价值**，这一条比 B19 的 ephemeral 词面判据更根本（词面认不出的形态也会掉）。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** 进 staging 所需的最少支撑域数（< 2 即「域内复述」）。判据有意复刻在 wv-staging-promote.mjs。 */
+export const CROSS_DOMAIN_MIN = 2
+
+/**
+ * 支撑域集合：候选自身 claimDomain ∪ 支撑证据的 claimDomain（去重、排序、丢空值）。
+ * @param {string|null|undefined} claimDomain - 候选自己的域
+ * @param {string[]} evidenceDomains - 支撑证据的 claimDomain 列表
+ * @returns {string[]}
+ */
+export function supportDomains(claimDomain, evidenceDomains) {
+  const set = new Set()
+  if (claimDomain) set.add(claimDomain)
+  for (const d of Array.isArray(evidenceDomains) ? evidenceDomains : []) if (d) set.add(d)
+  return [...set].sort()
+}
+
+/**
+ * 是否跨域（判据 A）。同域重复不算跨域。
+ * @param {string[]} domains
+ * @param {number} [min]
+ * @returns {boolean}
+ */
+export function looksCrossDomain(domains, min = CROSS_DOMAIN_MIN) {
+  if (!Array.isArray(domains)) return false
+  return new Set(domains.filter(Boolean)).size >= min
+}
+
+/**
+ * 从已查好的 evidence 行里收 supportDomains / authorities（纯函数，可测）。
+ * 只读，不改任何表——append-only 铁律不受影响。
+ * @param {object[]} entries - evidence 行（camelCase 或 DB 原始行都认）
+ * @returns {{domains:string[], authorities:string[]}}
+ */
+export function lookupEvidenceSupport(entries) {
+  const domains = []
+  const authorities = []
+  for (const r of Array.isArray(entries) ? entries : []) {
+    if (!r) continue
+    const d = r.claimDomain ?? r.claim_domain
+    const a = r.authority
+    if (d) domains.push(d)
+    if (a) authorities.push(a)
+  }
+  return { domains, authorities }
+}
+
+/**
+ * 候选 → 带上判据 A/B 所需字段的候选行（`evidence` 由调用方按 evidenceIds 查好传入）。
+ * 两侧 authority 都用既有的非放大聚合 deriveObservationAuthority（取最弱）——不新造语义。
+ * @param {object} c - 候选（含 observationAuthorities：其成员 observation 的 authority）
+ * @param {object[]} [evidence]
+ * @returns {object}
+ */
+export function enrichCandidate(c, evidence = []) {
+  const { domains, authorities } = lookupEvidenceSupport(evidence)
+  const obs = Array.isArray(c.observationAuthorities) ? c.observationAuthorities : []
+  return {
+    ...c,
+    evidenceDomains: domains,
+    evidenceAuthorities: authorities,
+    evidenceAuthority: authorities.length ? deriveObservationAuthority(authorities) : null,
+    conclusionAuthority: obs.length ? deriveObservationAuthority(obs) : null,
+    supportDomains: supportDomains(c.claimDomain, domains),
+  }
+}
+
+/**
+ * 判据 A/B 的准入判定（纯函数，两处复刻的核心）。null = 放行，字符串 = 挡下理由。
+ * @param {object} c - 候选（须含支持域与两侧 authority；缺字段 = 不可核验）
+ * @param {object} [opts]
+ * @returns {string|null}
+ */
+export function stagingBlockReason(c, opts = {}) {
+  if (looksEphemeral(c.text)) return 'ephemeral（进度快照，B19 判据）'
+  if ((c.evidenceIds ?? []).length === 0) return '无证据回链'
+  const domains = c.supportDomains ?? supportDomains(c.claimDomain, c.evidenceDomains)
+  if (!looksCrossDomain(domains, opts.minDomains ?? CROSS_DOMAIN_MIN)) {
+    return '域内复述（支撑域 ' + (domains.join('+') || '?') + ' < ' + (opts.minDomains ?? CROSS_DOMAIN_MIN)
+      + '）——跨域重组有价值，域内复述没有（Discovery by Dreaming 2607.16256）'
+  }
+  const minEv = (c.evidenceAuthorities ?? []).slice().sort((a, b) => rankOf(a) - rankOf(b))[0]
+  if (!c.conclusionAuthority || !minEv) return 'authority 不可核验（缺 conclusionAuthority / evidenceAuthority）'
+  if (rankOf(c.conclusionAuthority) > rankOf(minEv)) {
+    return 'authority 不得放大：结论=' + c.conclusionAuthority + ' > 支撑最低=' + minEv
+      + '（AuthMem-Bench 2608.01679）'
+  }
+  return null
+}
+
+/** 本地秩表（与 src/policy.mjs 的 AUTHORITY_RANK 同序；脚本可在无仓环境下独立跑）。 */
+const RANK = Object.freeze({
+  user_correction: 6,
+  user_explicit: 5,
+  system_policy: 4,
+  external_information: 3,
+  single_observation: 2,
+  agent_inference: 1,
+  agent_self_evaluation: 0,
+})
+
+/** @returns {number} 未知值 → -1（比任何已知值都低 → 会被判为放大并挡下，fail-safe） */
+function rankOf(authority) {
+  const r = RANK[authority]
+  return r === undefined ? -1 : r
+}
+
 
 export function parseArgs(argv) {
   const a = {}
@@ -70,6 +198,11 @@ export function parseArgs(argv) {
     lib: a.lib || '',
     out: a.out || '',
     cloudOut: a['cloud-out'] || '',
+    // 2026-09-25：此前 deviceId/exportedAt 只读 opts 却没人解析 → 恒为 undefined，
+    // manifest 的 deviceId 永远写 'unknown'，scp 到 inbound-acp/<slot>/ 时不知道该进哪个槽。
+    // 约定与 wv-sync.ps1 一致：WEAVER_SLOT 环境变量，缺省 w（本机 W 机）。
+    deviceId: a.device || process.env.WEAVER_SLOT || 'w',
+    exportedAt: a['exported-at'] || '',
     limit: Number(a.limit || 0) || 0,
     json: a.json === '1' || a.json === 'true',
   }
@@ -165,7 +298,47 @@ export function toStagingRecord(c, rec) {
     occurrences: c.occurrences ?? 0,
     sessions: Array.isArray(c.sessions) ? c.sessions.length : (c.sessions ?? null),
     days: c.days ?? null,
+    // 2026-09-25（判据 A/B）：staging 是**跨机**通道，云端 promote 手上只有这条记录——
+    //   staging.db 里没有 ACP 账本可查。所以支撑域与两侧 authority 必须**随记录带过去**，
+    //   否则判据在云端无法核验（那就要么静默放行、要么全靠猜）。
+    evidenceDomains: Array.isArray(c.evidenceDomains) ? c.evidenceDomains : [],
+    supportDomains: c.supportDomains ?? supportDomains(c.claimDomain, c.evidenceDomains),
+    crossDomain: looksCrossDomain(c.supportDomains ?? supportDomains(c.claimDomain, c.evidenceDomains)),
+    conclusionAuthority: c.conclusionAuthority ?? null,
+    evidenceAuthority: c.evidenceAuthority ?? null,
   }
+}
+
+/**
+ * 组装 staging 导出（判据 A/B 的落地点）。
+ * 与 buildExport 的区别：buildExport 管「出不出 ACP」（白名单 + 证据回链）；
+ * 本函数管「进不进 staging」（跨域 + 不放大 + ephemeral + 有证据）。
+ * @param {object[]} candidates - 候选行
+ * @param {object} [opts] - { minDomains }
+ * @returns {{records:object[], blocked:object[]}}
+ */
+export function buildStagingExport(candidates, opts = {}) {
+  const records = []
+  const blocked = []
+  for (const c of candidates) {
+    // 第一道仍然是**导出白名单**（画像三域永不出 ACP，DREAMING §10.2）。
+    // 2026-09-25 实测修正：staging 闸门起初只查判据 A/B，会把 user_preference 写进 staging 记录
+    // ——DREAMING §11.4 的前提「白名单已挡画像三域」并不成立（那段代码当时只作用于本地 JSONL）。
+    if (!EXPORTABLE_DOMAINS.includes(c.claimDomain)) {
+      const isProfile = BLOCKED_DOMAINS.includes(c.claimDomain)
+      blocked.push({
+        id: c.id,
+        domain: c.claimDomain,
+        reason: isProfile ? '画像域，永不出 ACP' : '不在导出白名单（仅 work / external_fact）',
+      })
+      continue
+    }
+    const reason = stagingBlockReason(c, opts)
+    if (reason) { blocked.push({ id: c.id, domain: c.claimDomain, reason }); continue }
+    const rec = toWeaverRecord(c, opts)
+    records.push(toStagingRecord(c, rec))
+  }
+  return { records, blocked }
 }
 
 /** 组装 staging 文件正文：首行 manifest + 每行候选（与 wv-sync 的 inbound 同构，但走**独立通道**） */
@@ -193,7 +366,24 @@ function main() {
   try {
     const res = ledger.queryCandidateMemory({ state: opts.state, limit: opts.limit || 500 })
     const { records, blocked } = buildExport(res.items, { lib: opts.lib })
-    if (opts.json) { console.log(JSON.stringify({ records, blocked }, null, 2)); return }
+    // 判据 A/B 需要两样 staged 记录里没有的东西：支撑证据的域、以及两侧 authority。
+    // 账本在本地，所以在这里查好、随记录带过机（云端只有 staging.db）。
+    const evCache = new Map()
+    const lookup = (ids) => (Array.isArray(ids) ? ids : []).map((id) => {
+      if (!evCache.has(id)) evCache.set(id, ledger.getById(id) || null)
+      return evCache.get(id)
+    })
+    // 判据 B 的另一侧：结论的 authority 来自**成员 observation 的 authority 列**
+    // （那列是 evidence→observation 那一步按非放大算好的，见 store.deriveObservationAuthority）。
+    // 2026-09-25 实测发现：不取它 → conclusionAuthority 恒为 null → 全部候选判「不可核验」。
+    const enriched = res.items.map((c) => enrichCandidate({
+      ...c,
+      observationAuthorities: (c.observationIds ?? [])
+        .map((oid) => ledger.getObservationById(oid)?.authority)
+        .filter(Boolean),
+    }, lookup(c.evidenceIds)))
+    const stagingRes = buildStagingExport(enriched, { lib: opts.lib })
+    if (opts.json) { console.log(JSON.stringify({ records, blocked, staging: stagingRes.records, stagingBlocked: stagingRes.blocked }, null, 2)); return }
     console.log('[export] state=' + opts.state + '  匹配 ' + res.total + ' 条'
       + (opts.lib ? '  --lib ' + opts.lib : '  （未给 --lib，导入时需 wv import --lib <lib>）'))
     for (const b of blocked) {
@@ -202,13 +392,14 @@ function main() {
     console.log('  可导出 ' + records.length + ' 条，挡下 ' + blocked.length + ' 条')
     const jsonl = records.map((r) => JSON.stringify(r)).join('\n')
     if (opts.cloudOut) {
-      // 用 source 反查候选：buildExport 会挡掉不合规的，索引与 res.items 并不一一对应
-      const byId = new Map(res.items.map((x) => [x.id, x]))
-      const staging = records.map((r) => {
-        const id = String(r.source || '').replace('acp-dreaming:', '')
-        return toStagingRecord(byId.get(id) || { id }, r)
-      })
+      // 两条独立的链：buildExport 管「出不出 ACP」（白名单），buildStagingExport 管「进不进 staging」
+      // （判据 A 跨域 + 判据 B 不放大 + B19 ephemeral + 有证据回链）。staging 只走后者。
+      const staging = stagingRes.records
       writeFileSync(opts.cloudOut, toStagingPayload(staging, opts.deviceId || '', opts.exportedAt || ''), 'utf8')
+      console.log('[export] staging 闸门：可进 ' + staging.length + ' 条 · 挡下 ' + stagingRes.blocked.length + ' 条')
+      for (const b of stagingRes.blocked) {
+        console.log('  [staging 挡下] ' + (b.domain || '?') + '（' + b.reason + '）  ' + b.id)
+      }
       console.log('[export] 已写 staging 格式 ' + opts.cloudOut + '（' + staging.length + ' 条，供云端接纳器）')
       console.log('[export] 下一步：scp 到 <weaver>/inbound-acp/<slot>/ 后跑 wv-staging-accept.mjs')
     }

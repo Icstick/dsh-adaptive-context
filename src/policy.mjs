@@ -84,6 +84,71 @@ export function classifyStrength(authority) {
   return STRENGTH_MAP[authority] ?? 'not_eligible'
 }
 
+// ── 权威序与「非放大」判定（判据 B，2026-09-25）─────────────────────────────
+//
+// 依据：AuthMem-Bench（https://arxiv.org/abs/2608.01679）。它把失败命名为
+//   **authority collapse**——「巩固保留了主张，却抹掉了约束其可用范围的来源限制，
+//   使存下来的记忆暗示出比来源允许的更大的权威」，49 组配置里 48 组出现，
+//   失败点就在**巩固那一步**（= 本仓 dreaming → staging promote）。
+//
+// 本仓已有同一条防火墙的上游一段：store.deriveObservationAuthority 在
+//   evidence → observation 那一步就取「支撑证据里最弱的一条」。本常量是它的
+//   **同序**显式表达，供下游 observation → promote 那一段复用，避免两段各写一份秩表。
+//
+// ⚠️ 不要拿 constants.mjs 的 AUTHORITY_ORDER 当权威序：那是**枚举/声明顺序**
+//    （system_policy 排第一），当序用会得出「系统策略 > 用户明说」，与
+//    test/observation-authority.test.mjs 断言的方向相反。权威序只有这一处。
+export const AUTHORITY_RANK = Object.freeze({
+  user_correction: 6,
+  user_explicit: 5,
+  system_policy: 4,
+  external_information: 3,
+  single_observation: 2,
+  agent_inference: 1,
+  agent_self_evaluation: 0,
+})
+
+/**
+ * authority → 秩（越大越可信）；未知值 → null（**不可比**，调用方须 fail-safe）。
+ * @param {string} authority
+ * @returns {number|null}
+ */
+export function authorityRank(authority) {
+  const r = AUTHORITY_RANK[authority]
+  return r === undefined ? null : r
+}
+
+/**
+ * 判据 B（纯函数）：结论是否比它**全部**支撑证据里最低的那条更有权威。
+ * 取最低秩——非放大防火墙（EXPRESSION.md §4 / store.deriveObservationAuthority 同序）。
+ * @param {string} conclusionAuthority - 巩固产物声明的 authority
+ * @param {string[]} evidenceAuthorities - 全部支撑证据的 authority 值
+ * @returns {boolean|null} true=放大（应拒绝）/ false=未放大 / **null=不可判定**（缺证据、值非法）
+ */
+export function amplifiesAuthority(conclusionAuthority, evidenceAuthorities) {
+  const c = authorityRank(conclusionAuthority)
+  if (c === null) return null
+  const rows = Array.isArray(evidenceAuthorities) ? evidenceAuthorities : []
+  const ranks = rows.map((a) => authorityRank(a)).filter((r) => r !== null)
+  if (ranks.length === 0) return null
+  return c > Math.min(...ranks)
+}
+
+/** 判据 B 的固定 reason 前缀（测试与审计直接引用；两处判据共用同一措辞） */
+export const AUTHORITY_AMPLIFIED = 'authority amplified at consolidation boundary'
+
+/**
+ * 判据 B 的可读拒绝理由（写进已有的 decision_reason，不新造平行字段）。
+ * @param {string} conclusionAuthority
+ * @param {string} minEvidenceAuthority
+ * @returns {string}
+ */
+export function authorityNotAmplifiedReason(conclusionAuthority, minEvidenceAuthority) {
+  return AUTHORITY_AMPLIFIED + '：结论 authority=' + conclusionAuthority
+    + ' 高于支撑证据里最低的 ' + minEvidenceAuthority
+    + '（AuthMem-Bench 2608.01679：巩固不得放大来源权威）'
+}
+
 /** 字段兼容读取：优先 camelCase（store.toEvidence 行），回退 snake_case（DB 原始行）。 */
 function pick(row, camel, snake) {
   if (row == null) return undefined
