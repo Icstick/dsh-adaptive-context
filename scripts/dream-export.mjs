@@ -159,6 +159,12 @@ export function toStagingRecord(c, rec) {
     source: rec.source,
     tags: rec.tags,
     confidence: rec.confidence,
+    // 2026-09-25（DREAMING 收尾实测）：**必须输出 occurrences**——promote 的判据 B（本机复现 >= N）
+    // 读的就是这个字段，此前没输出它 → staging 记录里没有该键 → occ 恒为 0、判据 B 永不成立。
+    // sessions 出条数（不是数组）避免把各机会话 id 固化进 staging。
+    occurrences: c.occurrences ?? 0,
+    sessions: Array.isArray(c.sessions) ? c.sessions.length : (c.sessions ?? null),
+    days: c.days ?? null,
   }
 }
 

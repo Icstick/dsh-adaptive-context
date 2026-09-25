@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { looksEphemeral, toWeaverRecord } from '../scripts/dream-export.mjs'
+import { looksEphemeral, toWeaverRecord, toStagingRecord } from '../scripts/dream-export.mjs'
 
 // ACP-B19（2026-09-25）：判据强化 + 「两处必须同步」的守护。
 // 判据有意复刻在两处：本仓 dream-export.mjs（降权不挡下）与 .tooling/scripts/wv-staging-promote.mjs（挡下）。
@@ -35,6 +35,21 @@ test('toWeaverRecord：进度快照降权 + 打 ephemeral 标签（不挡下）'
   const plain = toWeaverRecord({ ...base, id: 'c2', text: 'junction 在 Session 0 读不了' })
   assert.equal(plain.tags.includes('ephemeral'), false)
   assert.equal(plain.confidence, 0.9)
+})
+
+test('toStagingRecord：必须带 occurrences —— promote 的判据 B 读的就是它', () => {
+  // 2026-09-25 实测：此前没输出 occurrences → staging 记录无该键 → occ 恒 0 → 判据 B 永不成立。
+  const rec = toStagingRecord(
+    { id: 'c1', subject: '用户', claimDomain: 'work', occurrences: 7, sessions: ['s1', 's2', 's3'], days: 3 },
+    { title: 'T', summary: 'S', body: 'B', source: 'acp-dreaming:c1', tags: ['t'], confidence: 0.9 },
+  )
+  assert.equal(rec.occurrences, 7)
+  assert.equal(rec.sessions, 3)
+  assert.equal(rec.days, 3)
+  assert.equal(Object.hasOwn(rec, 'occurrences'), true)
+  // 缺字段时也要给出 0，而不是 undefined（promote 端 Number(undefined ?? 0) 才稳）
+  const bare = toStagingRecord({ id: 'c2' }, { title: 'T2', summary: 'S2' })
+  assert.equal(bare.occurrences, 0)
 })
 
 test('两处判据保持同步（本仓 dream-export.mjs ↔ .tooling/wv-staging-promote.mjs）', () => {
