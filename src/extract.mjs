@@ -44,11 +44,27 @@ const WORTHY_PREFIXES = ['user/', 'tool/', 'turn/', 'agent/inbox/spliced']
  */
 const INSERTABLE_INBOX_KINDS = new Set(['user'])
 
-/** 用户明确纠正的标记（事件类型或内容特征） */
+/** 用户明确纠正的标记（事件类型或内容特征）。
+ *
+ *  2026-09-25 拆分强/弱两组，并加疑问句闸门 —— 修一个**子串匹配**缺陷：
+ *  旧实现用 `text.includes(marker)`，于是
+ *    「是不是」里含「不是」、「要不要」里含「不要」
+ *  让纯提问被判成 user_correction，再经 claimDomainOf 映射进 user_preference 域。
+ *  实测后果：账本 active 的 user_preference evidence 19 条里绝大多数根本不是偏好，
+ *  而是"要不要精炼 ACP 里的内容？""是不是可以从上下文占比调整为费用占比"这类疑问句。
+ *
+ *  「错了」已整条移出：它最常出现在"报错了？""报错了，帮忙修一下"这类**报障**中；
+ *  而真正的纠正几乎都会带上「改成 / 改为 / 更正」。本仓取向一贯是**宁可少判纠正**。 */
 const CORRECTION_MARKERS = [
-  '更正', '纠正', '不对', '不是', '错了', '改成', '改为', '不要',
+  '更正', '纠正', '不对', '不是', '改成', '改为', '不要',
   'correction', 'actually', 'instead',
 ]
+
+/** 疑问句特征：整句是在提问，不是在纠正。命中则不判纠正（显式「更正：」前缀除外）。 */
+const QUESTION_FORM = /(?:是不是|要不要|是否|有没有|能不能|可不可以|行不行|对不对|好不好|了吗|呢|吗)/
+
+/** 显式自我标注的纠正前缀（"更正：…""纠正，…"）—— 疑问句不会这么写，命中即判 */
+const CORRECTION_EXPLICIT = /^\s*(?:更正|纠正|correction)\s*[:：,，]?/i
 
 /**
  * 从 agent/inbox/spliced 事件的 data.inserted[] 提取文本
@@ -277,6 +293,12 @@ export function isCorrection(event) {
       if (text.startsWith(p)) return false
     }
   }
+  // 显式自我标注的纠正：疑问句不会这么写，命中即判。
+  if (CORRECTION_EXPLICIT.test(text)) return true
+  // 疑问句闸门（2026-09-25）：整句在问 → 不判纠正。
+  // 这一条挡住的是「是不是…」「要不要…」这类被**子串**误触的提问，
+  // 以及"报错了？"这类带问号的报障句。
+  if (QUESTION_FORM.test(text) || /[?？]\s*$/.test(text)) return false
   // 至少 2 个汉字 + 含标记词；单字"不/对"太宽松
   return CORRECTION_MARKERS.some((m) => text.includes(m)) && text.length >= 2
 }

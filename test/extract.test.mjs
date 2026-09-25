@@ -199,6 +199,59 @@ test('tool 结果含纠正词不判 correction', () => {
   assert.equal(sourceClassOf(ev), 'external_tool')
 })
 
+// ===================== 2026-09-25：疑问句被子串误判为纠正 =====================
+// 实测背景：账本 active 的 user_preference evidence 19 条里，绝大多数是下面这类
+// **疑问句**。根因是 CORRECTION_MARKERS 用 includes 做子串匹配 ——
+//   「是不是」里含「不是」、「要不要」里含「不要」，于是"要不要精炼 ACP 里的内容？"
+//   被判成 user_correction，再按 claimDomainOf 映射进 user_preference 域。
+// 修复方向是**提高精度**（本仓既有取向：宁可少判纠正，也不误判）。
+
+test('疑问句「是不是…？」不判 correction → user_input / user_fact', () => {
+  const ev = { type: 'user/message', id: 'q1', content: '那我们这里是不是可以从上下文占比调整为费用占比' }
+  assert.equal(isCorrection(ev), false)
+  assert.equal(sourceClassOf(ev), 'user_input')
+  assert.equal(authorityOf(ev), 'user_explicit')
+  assert.equal(claimDomainOf(ev), 'user_fact')
+})
+
+test('疑问句「要不要…呢？」不判 correction', () => {
+  const ev = { type: 'user/message', id: 'q2', content: '好呢好呢，要不要在设置页增加插件配置呢？' }
+  assert.equal(isCorrection(ev), false)
+  assert.equal(claimDomainOf(ev), 'user_fact')
+})
+
+test('「要不要精炼 ACP 里的内容？」不判 correction', () => {
+  const ev = { type: 'user/message', id: 'q3', content: '要不要精炼ACP里的内容？' }
+  assert.equal(isCorrection(ev), false)
+})
+
+test('报障句「报错了？」不判 correction（「错了」已移出标记词）', () => {
+  const ev = { type: 'user/message', id: 'q4', content: '报错了？' }
+  assert.equal(isCorrection(ev), false)
+})
+
+test('报障句「刚刚有个会话报错了，帮忙修一下呜呜」不判 correction', () => {
+  const ev = { type: 'user/message', id: 'q5', content: '刚刚有个会话报错了，帮忙修一下呜呜' }
+  assert.equal(isCorrection(ev), false)
+  assert.equal(claimDomainOf(ev), 'user_fact')
+})
+
+test('「…是不是我们的 acp 和仓库不同步呢？」不判 correction', () => {
+  const ev = { type: 'user/message', id: 'q6', content: '我总觉得之前在澪姐那里这些都有处理过，是不是我们的acp和仓库不同步呢？' }
+  assert.equal(isCorrection(ev), false)
+})
+
+test('真纠正句不受影响：「不对，应该用 Bun」→ 仍判 correction', () => {
+  const ev = { type: 'user/message', id: 'q7', content: '不对，应该用 Bun' }
+  assert.equal(isCorrection(ev), true)
+  assert.equal(sourceClassOf(ev), 'user_correction')
+})
+
+test('真纠正句不受影响：「不要用 npm」→ 仍判 correction', () => {
+  const ev = { type: 'user/message', id: 'q8', content: '不要用 npm' }
+  assert.equal(isCorrection(ev), true)
+})
+
 test('system-reminder 内容不摄入', () => {
   const ev = {
     type: 'agent/inbox/spliced',
