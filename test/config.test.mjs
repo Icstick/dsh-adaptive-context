@@ -1,11 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Config } from '../src/index.mjs'
+import { Config, unwrapVolatileConfig } from '../src/index.mjs'
 
 test('plugin config validates defaults through Standard Schema', async () => {
   const result = await Config['~standard'].validate({})
 
-  assert.deepEqual(result, {
+  // 0.1.7：Config 字段带 .volatile()（插件页表单要）—— schema 产出的是 cosmokit 响应式引用，
+  // 断言前先解包；无默认值的字段解包后是 undefined，去掉这些空键再比对。
+  const plain = unwrapVolatileConfig(result.value)
+  for (const key of Object.keys(plain)) if (plain[key] === undefined) delete plain[key]
+
+  assert.deepEqual({ value: plain }, {
     value: {
       hotTokens: 900, // 2026-09-02：对齐 MVP_TOTAL_BUDGET（此前 300 但 composer 从不读取＝死配置）
       recallLimit: 20,

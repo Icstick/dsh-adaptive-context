@@ -43,40 +43,40 @@ export const name = 'adaptive-context'
 export const inject = ['llm', 'tools']
 
 export const Config = z.object({
-  ledgerDir: z.string(),
+  ledgerDir: z.string().volatile(),
   // P0-5（2026-09-02）：默认对齐 MVP_TOTAL_BUDGET(900)。此前默认 300 但 composer 从不读取，
   // 实际预算一直是 quota 合计 900；现在配置真的生效，默认值必须对齐否则等于悄悄砍掉 2/3 注入面。
-  hotTokens: z.number().step(1).min(1).default(900),
+  hotTokens: z.number().step(1).min(1).default(900).volatile(),
   /** P1-1（2026-09-02）：observation 注入开关。**默认 false = 冻结**（用户 2026-09-02 决策：
    *  先冻结、修好失败吞批止血，两个月内无消费场景则删表与 consolidate 模块）。
    *  接线已就位，打开即用，无需改代码。 */
-  observationInjection: z.boolean().default(false),
+  observationInjection: z.boolean().default(false).volatile(),
   // T2（2026-09-07）：observation 注入权威闸门——只放行高权威蒸馏轨
   // （user_explicit/user_correction 源）；single_observation 等低权威不进常规注入（留账本供 acp_query）。
   // 语义：开闸不是全量开——先让"你的纠正/明确偏好"稳定可达，再观察是否需要放宽。
-  observationAuthorities: z.array(z.string()).default(['user_explicit', 'user_correction']),
-  recallLimit: z.number().step(1).min(1).default(20),
+  observationAuthorities: z.array(z.string()).default(['user_explicit', 'user_correction']).volatile(),
+  recallLimit: z.number().step(1).min(1).default(20).volatile(),
   // DEPRECATED（2026-09-07，PLAN-S2 P3）：读侧矩阵列已按候选自身 claimDomain 自然分组，
   // 本键不再影响注入（保留键位仅为兼容存量配置/settings 页；新语义无需配置）。
-  targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work'),
+  targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))).default('work').volatile(),
   // 跨会话注入闸门（2026-08-30 决策 D1，ISSUES-INJECTION-ISOLATION.md F7）：
   //   non-instructional（默认）——跨会话只注入非指令性内容（agent_authored/external_tool…），
   //                             user_input/user_correction 跨会话不注入；
   //   all —— 跨会话全类别注入（utility×0.3 惩罚 + session provenance 标记）；
   //   none —— 不注入任何跨会话内容。
-  crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))).default('non-instructional'),
+  crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))).default('non-instructional').volatile(),
   // 融合策略（2026-09-09）：weighted = 语义/词面加权求和（历史行为，默认）；
   // rrf = 两路各自排序后 Reciprocal Rank Fusion——异构分数不做尺度相加。
   // 默认不切换：排序变化需要先有对照数据（见 docs/design/COMPOSER.md §4.1）。
-  fusion: z.union([z.const('weighted'), z.const('rrf')]).default('weighted'),
+  fusion: z.union([z.const('weighted'), z.const('rrf')]).default('weighted').volatile(),
   // 子代理会话降权（2026-08-30 决策 D2）：session.header.origin==='subagent' 时
   // kind='user' 的消息（父 agent 派发 prompt）降权为 agent_inference（记录但 quarantine），
   // 避免父任务书冒充用户指令。
-  subagentDowngrade: z.boolean().default(true),
-  debug: z.boolean().default(false),
+  subagentDowngrade: z.boolean().default(true).volatile(),
+  debug: z.boolean().default(false).volatile(),
   // MemOS RecallProvider（T3 P0-3）：semantic 分来源，MVP 实验接入
-  memosBaseUrl: z.string().default('http://127.0.0.1:18801'),
-  memosEnabled: z.boolean().default(true),
+  memosBaseUrl: z.string().default('http://127.0.0.1:18801').volatile(),
+  memosEnabled: z.boolean().default(true).volatile(),
   // RecallProviders 注册表（M3 A1）：多记忆源并行召回；缺省（undefined）自动用
   // memosBaseUrl/memosEnabled 构造默认 memos 项（向后兼容，M2 行为不变）；
   // 显式 [] 表示不启用任何 recall provider。
@@ -88,21 +88,21 @@ export const Config = z.object({
   llmTasks: z.any(),
   // Materialized view 启动校验（M3 C3）：apply 时 verifyView('expression')，
   // 与 candidate 重放不一致自动 rebuild（默认 true；false = 只校验不重建）。
-  startupRebuild: z.boolean().default(true),
+  startupRebuild: z.boolean().default(true).volatile(),
   // Background consolidation（可选：缺省用 constants 默认；llm 路由缺省则走规则兜底）
-  consolidationMinEvidence: z.number().step(1).min(1),
-  consolidationMinTurns: z.number().step(1).min(1),
-  consolidationProvider: z.string(),
-  consolidationModel: z.string(),
-  consolidationMaxTokens: z.number().step(1).min(1),
-  consolidationTimeoutMs: z.number().step(1).min(1),
-  consolidationMaxBatch: z.number().step(1).min(1), // P0-6：单批证据上限透传（默认 constants 40）
+  consolidationMinEvidence: z.number().step(1).min(1).volatile(),
+  consolidationMinTurns: z.number().step(1).min(1).volatile(),
+  consolidationProvider: z.string().volatile(),
+  consolidationModel: z.string().volatile(),
+  consolidationMaxTokens: z.number().step(1).min(1).volatile(),
+  consolidationTimeoutMs: z.number().step(1).min(1).volatile(),
+  consolidationMaxBatch: z.number().step(1).min(1).volatile(), // P0-6：单批证据上限透传（默认 constants 40）
   // M3 B3：guarded auto promotion + materialized view（EXPRESSION.md §8：默认全人工）
-  autoPromote: z.boolean().default(false), // master switch：true 才走 policy 自动提升路径
-  viewsDir: z.string(),                    // 可选：materialized view 目录（缺省 ledgerDir/views）
+  autoPromote: z.boolean().default(false).volatile(), // master switch：true 才走 policy 自动提升路径
+  viewsDir: z.string().volatile(), // 可选：materialized view 目录（缺省 ledgerDir/views）
   // T4 M4.1b（2026-09-07）：规则视图目录（人类可读 rules/ 视图，可从 ledger 重建；
   // 缺省 ~/.dsh/rules——跨 workspace/profile 全局）。patch/settings 级配置。
-  rulesDir: z.string(),
+  rulesDir: z.string().volatile(),
   // S1 P2（2026-09-04）：section quota 覆盖（如 { user_model: 800 }）。
   // 不配置 = composer 用 MVP_SECTION_QUOTA（user_model 180/…）；总预算仍由 hotTokens 控制。
   sectionQuota: z.any(),
@@ -112,13 +112,13 @@ export const Config = z.object({
   //   off    = 关闭判别
   //   shadow = 只统计不生效（默认——先观察注入差异再切）
   //   on     = 生效过滤
-  preferenceEphemeralFilter: z.string().default('shadow'),
+  preferenceEphemeralFilter: z.string().default('shadow').volatile(),
   // 2026-09-12（用户拍板）：observation 时间衰减——老经验按半衰期让位（仅 observation 轨，
   // evidence 不衰减）；0 = 关闭。decay = 0.5^(ageDays / 此值)。
-  observationHalfLifeDays: z.number().default(30),
+  observationHalfLifeDays: z.number().default(30).volatile(),
   // 2026-09-12（用户拍板）：C3 注入滞回——上一步在注入集的候选获 ×(1+h) 粘性加成，
   // 抑制相邻 step 抖动；0 = 关闭。0.2 表示挤掉在位条目需多 20% utility。
-  injectionHysteresis: z.number().default(0.2),
+  injectionHysteresis: z.number().default(0.2).volatile(),
 })
 
 /**
@@ -315,9 +315,31 @@ export function mergeSettingsIntoConfig(ctx, config) {
   return merged
 }
 
+/**
+ * dsh 0.1.7：Config 里带 .volatile() 的字段，运行时是 cosmokit 的响应式引用（不是原始值）——
+ * 读值必须先 .get()（同 dsh-usage-card 的 config[key].get() 处理）。
+ * 插件内部一律读解包后的普通值；不解包会把 ref 当字符串/对象用（例如把 ref 拼进路径）。
+ */
+function isVolatileRef(value) {
+  if (value === null || typeof value !== 'object') return false
+  if (typeof value.get !== 'function') return false
+  return Object.getOwnPropertySymbols(value).some((s) => String(s).includes('cosmokit.volatile'))
+}
+
+/** 递归解包 Config（volatile ref → 普通值；数组/对象逐层处理）。 */
+export function unwrapVolatileConfig(value) {
+  if (value === null || typeof value !== 'object') return value
+  if (isVolatileRef(value)) return unwrapVolatileConfig(value.get())
+  if (Array.isArray(value)) return value.map(unwrapVolatileConfig)
+  const out = {}
+  for (const [key, item] of Object.entries(value)) out[key] = unwrapVolatileConfig(item)
+  return out
+}
+
 export function apply(ctx, config = {}) {
-  // 设置页（settings.yaml）优先于 cordis.patch.yml；apply 时一次性合并（重启生效）
-  config = mergeSettingsIntoConfig(ctx, config)
+  // profile entry config（设置页 / cordis.patch.yml）优先；apply 时一次性合并（重启生效）
+  // 再解包 volatile 引用 —— Config 上的 .volatile() 是给插件页表单用的，插件内部只认普通值。
+  config = unwrapVolatileConfig(mergeSettingsIntoConfig(ctx, config))
   // ledgerDir 兜底解析（与 openEvidenceLedger 同款；回落链见 src/home.mjs）
   const ledgerDir = config.ledgerDir ?? path.join(resolveDshHome(), 'acp')
   const ledger = openEvidenceLedger({ dir: ledgerDir })
@@ -357,31 +379,8 @@ export function apply(ctx, config = {}) {
     scopeId: scopeOf(ctx),
   })
 
-  // --- 设置页 namespace 注册（2026-08-30：设置 → 插件 → 插件配置 tab）---
-  // 字段与 Config 同源但独立 schema：设置页写 settings.yaml，apply 时 mergeSettingsIntoConfig 覆盖。
-  ctx.inject(['settings'], (settingsCtx) => {
-    // dsh >= 0.1.7（#4587）移除了 settings.register：无守卫时这里会抛错。
-    // 抛错被 cordis 吞掉、不影响 apply 主体，但会污染启动诊断 —— 无 register 即跳过。
-    if (typeof settingsCtx.settings?.register !== 'function') return
-    settingsCtx.settings.register(SETTINGS_NAMESPACE, z.object({
-      ledgerDir: z.string(),
-      hotTokens: z.number().step(1).min(1),
-      observationInjection: z.boolean(),
-      observationAuthorities: z.array(z.string()), // T2：注入权威白名单（UI 逗号分隔文本写入）
-      recallLimit: z.number().step(1).min(1),
-      // deprecated：读侧已按候选自身 claimDomain 分组，不再影响注入（保留键位兼容）
-      targetDomain: z.union(CLAIM_DOMAINS.map(domain => z.const(domain))),
-      crossSessionPolicy: z.union(CROSS_SESSION_POLICIES.map(p => z.const(p))),
-      fusion: z.union([z.const('weighted'), z.const('rrf')]),
-      subagentDowngrade: z.boolean(),
-      memosEnabled: z.boolean(),
-      memosBaseUrl: z.string(),
-      consolidationProvider: z.string(),
-      consolidationModel: z.string(),
-      autoPromote: z.boolean(),
-      debug: z.boolean(),
-    }))
-  })
+  // --- 设置页 namespace 注册：dsh 0.1.7（#4587）移除了 settings.register，整块删除（2026-09-25）。
+  // 现役路径：Config 的 .volatile() 字段 → 宿主 describe() 投影成表单 → 侧栏「插件」页的 bundle 卡片。
 
   // --- Service Definition：注册 ctx.acp ---
   // T6 桥：acp.requestPromotion(candidate, ctx) 兼容两参调用（C 组接缝）。

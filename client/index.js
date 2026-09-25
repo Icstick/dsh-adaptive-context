@@ -12,6 +12,10 @@ const { createElement: h, useState, useSyncExternalStore } = require('react')
 
 /** 设置页 namespace（与 host 侧 SETTINGS_NAMESPACE 一致） */
 const NS = 'adaptive-context'
+/** 0.1.7：configForms / describe 用的 profile entry id（cordis.patch.yml 的 id） */
+const ENTRY_ID = 'adaptive-context'
+/** 0.1.7：「插件」页的 slot key —— 必须是 bundle 包名 */
+const BUNDLE_KEY = 'dsh-adaptive-context'
 
 /** 顶层 section 标题/描述 */
 const TITLE = '自适应上下文（ACP）'
@@ -166,8 +170,11 @@ function makeSection(scope) {
           if (!(field.name in drafts)) continue
           const parsed = parseDraft(field, drafts[field.name])
           if (parsed === undefined) continue
-          if (parsed === null) writes.push(scope.unset(field.name))
-          else writes.push(scope.set(field.name, parsed))
+          // 0.1.6 的 settingsScope 有 unset；0.1.7 的 configForms form 只有 set（写 undefined 即回继承值）
+          if (parsed === null) {
+            if (typeof scope.unset === 'function') writes.push(scope.unset(field.name))
+            else writes.push(scope.set(field.name, undefined))
+          } else writes.push(scope.set(field.name, parsed))
         }
         await Promise.all(writes)
         setDrafts(null)
@@ -245,6 +252,25 @@ function makeSection(scope) {
  *     条目照常激活，0.1.7 上不注册自绘卡片。全程 fail-open，绝不抛出。
  */
 function apply(ctx) {
+  // ---- 0.1.7：侧栏「插件」页的 bundle 配置卡 ----
+  // 宿主按 host 侧 Config 的 .volatile() 字段投影出 form；slot key 必须是 bundle 包名。
+  // 命令式注入：0.1.6 没有 configForms → 回调不触发，条目照常激活（fail-open）。
+  try {
+    ctx.inject(['configForms'], (formsCtx) => {
+      try {
+        const forms = formsCtx.configForms
+        if (!forms || typeof forms.whileServed !== 'function' || typeof forms.get !== 'function') return
+        const form = forms.get(ENTRY_ID)
+        if (!form || typeof form.subscribe !== 'function' || typeof form.getSnapshot !== 'function') return
+        formsCtx.effect(() => forms.whileServed([ENTRY_ID], () => formsCtx.slots.inject('plugins.bundle.config', () => formsCtx.slots.register(
+          { name: 'plugins.bundle.config', key: BUNDLE_KEY },
+          makeSection(form),
+        ))), 'adaptive-context: bundle settings page')
+      } catch { /* fail-open：插件页卡片注册失败不影响条目激活 */ }
+    })
+  } catch { /* fail-open：configForms 命令式注入本身失败也不外抛 */ }
+
+  // ---- 0.1.6 兼容：设置面板顶层 section（0.1.7 无 settingsScope，回调不触发）----
   try {
     ctx.inject(['settingsScope'], (scopeCtx) => {
       try {
