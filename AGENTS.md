@@ -13,6 +13,7 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `src/index.mjs` —— 插件入口（服务装配、生命周期）
 - `src/service.mjs` / `store.mjs` —— 服务定义 / SQLite 账本存储（node:sqlite 单连接，append-only）。**v7 起有 8 张表**：evidence / observation / candidate / candidate_events / audit / rule / **candidate_memory / dream_run**
 - `src/views.mjs` / `composer.mjs` / `budget.mjs` —— 读视图 / 上下文组装 / 预算控制
+- `src/backlink.mjs` —— **读侧回链可核验性分层**（2026-09-25 方案 3）：`verifiable` / `unverifiable_foreign`（外机导入按设计清空，**不是缺陷**）/ `missing_backlink`（本机产出却无回链，**真异常**）/ `unknown`。判据 = observation id 与自身字段是否自洽（`observationIdOf` 在这里，store 反过来 import 它）。纯读、只标注，**不写任何数据、不改任何打分**
 - `src/candidates.mjs` —— 各来源行 → composer 候选的纯映射（`observationToCandidate`；从 index.mjs 分出以避免 index↔profile 环）
 - `src/profile.mjs` —— **Profile 物化视图**（CONTRACTS §4 五数组，A0）。由 observation 构建，**不落盘、每步现算**；`computeProfileWeight` 按支撑强度/复现天数/人工批准加权（只动 confidence，不碰 authority）
 - `src/dream.mjs` —— **Dreaming 第一增量**（离线巩固，零 LLM）：归并 / 复现计数 / 遗忘三件纯函数 + `runDream` 编排
@@ -26,7 +27,7 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `test/*.test.mjs` —— node:test 测试（每个 src 模块有对应测试）
 - `client/` + `lib/client.js` + `scripts/build-client.mjs` —— Web 设置页（改后需 build:client）
 - `cordis.patch.yml` —— bundle 装配补丁
-- `scripts/` —— **运维/离线脚本**（不在运行时链路上）：`ledger-audit.mjs`（只读账本体检，含画像段/候选池/冷存）、`ledger-quarantine-candidates.mjs` + `ledger-quarantine-apply.mjs`（存量隔离候选与执行器，默认 dry-run）、`dream.mjs`（离线巩固运行器）、`dream-review.mjs`（候选池人工审）、`dream-export.mjs`（候选 → weaver JSONL）、`build-client.mjs`、`ledger-import.mjs` + `ledger-release.mjs`（跨机 observation 的导入与放行；**放行闸门的判据与阈值都在 `src/release-gate.mjs`**，七类 + 三档，要改闸门改那里而不是改脚本）、`ledger-profile-doc.mjs`（从账本生成**人读画像** USER.md；M2/P3）、`ledger-quarantine-cascade.mjs`（**隔离级联**：把「源证据全被隔离且文本是过程噪声」的 observation 也标 quarantined；默认 dry-run，写前整库备份）
+- `scripts/` —— **运维/离线脚本**（不在运行时链路上）：`ledger-audit.mjs`（只读账本体检，含画像段/候选池/冷存）、`ledger-quarantine-candidates.mjs` + `ledger-quarantine-apply.mjs`（存量隔离候选与执行器，默认 dry-run）、`dream.mjs`（离线巩固运行器）、`dream-review.mjs`（候选池人工审）、`dream-export.mjs`（候选 → weaver JSONL）、`build-client.mjs`、`ledger-import.mjs` + `ledger-release.mjs`（跨机 observation 的导入与放行；**放行闸门的判据与阈值都在 `src/release-gate.mjs`**，七类噪声 + 一类溯源（`backlink`，2026-09-25）+ 三档，要改闸门改那里而不是改脚本）、`ledger-profile-doc.mjs`（从账本生成**人读画像** USER.md；M2/P3）、`ledger-quarantine-cascade.mjs`（**隔离级联**：把「源证据全被隔离且文本是过程噪声」的 observation 也标 quarantined；默认 dry-run，写前整库备份）
 - `docs/design/DREAMING.md` —— **Dreaming / Profile 设计与实测记录**（§10 weaver 通道、§11 云端 staging、§12 Profile）
 - `docs/adr/` —— 架构决策记录（只追加，见 ADR-README）
 - `.github/PULL_REQUEST_TEMPLATE.md` —— PR 模板（含架构影响栏）

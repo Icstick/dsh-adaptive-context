@@ -131,6 +131,10 @@ export function buildProfile(observations, opts = {}) {
       predicate: o.predicate ?? '',
       claimDomain: o.claimDomain,
       text: String(o.text ?? ''),
+      // 2026-09-25（方案 3）：ref 带上**它自己的** scopeId —— 回链档位的判据是
+      // 「id 与自身字段是否自洽」，而 scopeId 是 id 的派生输入之一；
+      // 多 scope 混进同一个 Profile 时，用 profile.subjectId 顶替会算出错的 id。
+      scopeId: o.scopeId ?? null,
       authority: o.authority ?? 'single_observation',
       evidenceIds,
       observedAt: o.observedAt ?? null,
@@ -170,7 +174,7 @@ export function profileToCandidates(profile, fallbackScopeId) {
         text: r.text,
         authority: r.authority,
         evidenceIds: r.evidenceIds,
-        scopeId: profile.subjectId,
+        scopeId: r.scopeId ?? profile.subjectId,
         observedAt: r.observedAt,
       }, fallbackScopeId),
       profileArray: r.array,

@@ -9,7 +9,7 @@ import { openEvidenceLedger } from '../src/store.mjs'
 import { parseArgs as parseReview, reviewCandidates, renderList } from '../scripts/dream-review.mjs'
 import {
   parseArgs as parseExport, deriveTitle, provenanceFooter, toWeaverRecord, buildExport, looksEphemeral,
-  EXPORTABLE_DOMAINS, BLOCKED_DOMAINS,
+  EXPORTABLE_DOMAINS, BLOCKED_DOMAINS, enrichCandidate, stagingBlockReason,
 } from '../scripts/dream-export.mjs'
 
 const CAND = (over = {}) => ({
@@ -180,3 +180,36 @@ test('toWeaverRecord：进度快照降权 0.2 且带 ephemeral 标签，真知�
   assert.ok(!real.tags.includes('ephemeral'))
   assert.equal(real.confidence, 0.9)
 })
+// ===================== 回链档位：理由分开，判据不放松（2026-09-25，方案 3） =====================
+// 此前一律写「无证据回链」——把「外机按设计清空」与「本机写入缺回链」压成同一句话，
+// 读的人只能理解成「本机数据有缺陷」。判据**不变**（两类都挡下）：回链不可核验就仍然
+// 进不了 staging —— 放行会让 572 个簇从「已知缺证据」变成「看起来有证据」（K 报告 §5.3 的陷阱）。
+
+test('无证据回链：外机档与本机档都挡下，但理由必须分开', () => {
+  const items = [
+    CAND({ id: 'cm_foreign', claimDomain: 'work', evidenceIds: [], backlinkTier: 'unverifiable_foreign' }),
+    CAND({ id: 'cm_local', claimDomain: 'work', evidenceIds: [], backlinkTier: 'missing_backlink' }),
+    CAND({ id: 'cm_plain', claimDomain: 'work', evidenceIds: [] }),
+  ]
+  const { records, blocked } = buildExport(items)
+  assert.equal(records.length, 0, '仍然全部挡下 —— 这一档只改「怎么说」，不改「放不放」')
+  const byId = Object.fromEntries(blocked.map((b) => [b.id, b.reason]))
+  assert.equal(blocked.length, 3)
+  assert.ok(/不可核验/.test(byId.cm_foreign), '外机档要说「不可核验（外机）」，不能说成本机缺数据：' + byId.cm_foreign)
+  assert.ok(/外机/.test(byId.cm_foreign))
+  assert.ok(/本机/.test(byId.cm_local), '本机档要说清是本机产出缺回链（真异常）：' + byId.cm_local)
+  assert.ok(!/不可核验/.test(byId.cm_local))
+  assert.equal(byId.cm_plain, '无证据回链', '不带档位信息时保持既有文案（向后兼容）')
+})
+
+test('stagingBlockReason：外机档理由是「不可核验」而不是「无证据回链」', () => {
+  const foreign = enrichCandidate(CAND({ id: 'cm_f', claimDomain: 'work', evidenceIds: [], backlinkTier: 'unverifiable_foreign' }), [])
+  const local = enrichCandidate(CAND({ id: 'cm_l', claimDomain: 'work', evidenceIds: [], backlinkTier: 'missing_backlink' }), [])
+  const rForeign = stagingBlockReason(foreign)
+  const rLocal = stagingBlockReason(local)
+  assert.ok(/不可核验/.test(rForeign), rForeign)
+  assert.ok(/本机/.test(rLocal), rLocal)
+  // 判据不变：都挡
+  assert.ok(rForeign && rLocal)
+})
+

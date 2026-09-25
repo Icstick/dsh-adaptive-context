@@ -129,21 +129,26 @@ function extractJsonObject(text) {
 
 /**
  * 解析 LLM 强制 JSON → 合法 Observation 列表。
+ * 护栏（2026-09-25 方案 3 的 B 部分）：模型可以输出 `evidenceIds: []`（解析层**不拒绝**——
+ * 拒绝会让整批判失败、水位卡死重试烧 LLM，那是更贵的错）。但**必须出声**：
+ * 空回链的条目逐条进 `warnings`，由调用方落日志。今天 W 上 `local & active & empty = 0`，
+ * 可这条路此前敞开着且无日志无测试拦截。
  * @param {string} text - 模型原始回复
- * @returns {{ok: boolean, observations: object[]}} 非法/空则 ok:false
+ * @returns {{ok: boolean, observations: object[], warnings: string[]}} 非法/空则 ok:false
  */
 export function parseObservations(text) {
-  if (typeof text !== 'string' || text.trim().length === 0) return { ok: false, observations: [] }
+  if (typeof text !== 'string' || text.trim().length === 0) return { ok: false, observations: [], warnings: [] }
   let data
   try {
     data = JSON.parse(extractJsonObject(text))
   } catch {
-    return { ok: false, observations: [] }
+    return { ok: false, observations: [], warnings: [] }
   }
   if (!data || typeof data !== 'object' || !Array.isArray(data.observations)) {
-    return { ok: false, observations: [] }
+    return { ok: false, observations: [], warnings: [] }
   }
   const observations = []
+  const warnings = []
   for (const o of data.observations) {
     if (!o || typeof o !== 'object') continue
     const subject = String(o.subject ?? '').trim()
@@ -155,6 +160,12 @@ export function parseObservations(text) {
     const evidenceIds = Array.isArray(o.evidenceIds)
       ? o.evidenceIds.map(String).filter((id) => id.length > 0)
       : []
+    // 护栏：无回链的观测**合法但可疑**——它会是读侧认不出的那种「本机缺回链」行
+    // （src/backlink.mjs 的 missing_backlink），且 authority 会被兜底成最弱的 single_observation。
+    if (evidenceIds.length === 0) {
+      warnings.push('observation[' + observations.length + '] ' + subject + ' ' + predicate + '：'
+        + text2.slice(0, 30) + ' —— 无 evidenceIds 回链（authority 将兜底 single_observation）')
+    }
     observations.push({
       subject,
       predicate,
@@ -170,9 +181,9 @@ export function parseObservations(text) {
   // 语义：observations 数组存在即 schema 合法——显式空 = 空产成功；
   // 仅当模型给出非空条目却全部字段非法（偏离契约）时判失败并保留重试。
   if (data.observations.length > 0 && observations.length === 0) {
-    return { ok: false, observations: [] }
+    return { ok: false, observations: [], warnings: [] }
   }
-  return { ok: true, observations }
+  return { ok: true, observations, warnings }
 }
 
 // ===================== LLM prompt =====================
@@ -193,6 +204,10 @@ export function buildConsolidationPrompt(evidences, maxContentChars = CONSOLIDAT
     // 2026-09-09（non-amplification）：observation 的权威 = 支撑证据中最弱的一条，
     // 所以把弱证据塞进 evidenceIds 只会稀释结论的可信度。写清规则，让模型自己精确。
     'An observation inherits the WEAKEST authority among its supporting evidenceIds — list only the evidence that genuinely supports the claim; adding weak or unrelated evidence weakens the result.',
+    // 2026-09-25（方案 3）：此前这里只「劝阻」（别列弱证据），**从未要求 ≥1 条**——
+    // 于是 evidenceIds: [] 是一个完全合法的输出，读侧无从核验、authority 还会被兜底成最弱。
+    // 改成显式硬要求：没有支撑证据的主张**不要输出这条 observation**（而不是输出空数组）。
+    'Every observation MUST list at least one supporting evidenceId copied from the given evidence records. If no evidence record supports a claim, do NOT emit that observation (an observation without evidenceIds is invalid).',
     // P0-7（2026-09-02）：输出收敛——模型曾按每条 evidence 机械输出一条完整 observation
     // （20 条 × ~700 token 超 maxTokens 截断 → 连败）。改为显式引导合并 + 短文本。
     // P3 修复（2026-09-06）：batch8 × 800 字输入实测仍 ~12K token 机械输出（55 连败，
@@ -240,11 +255,11 @@ async function deriveViaLlm(evidences, llmCall, logger, maxContentChars) {
       continue
     }
     const parsed = parseObservations(text)
-    if (parsed.ok) return { ok: true, observations: parsed.observations }
+    if (parsed.ok) return { ok: true, observations: parsed.observations, warnings: parsed.warnings }
     lastError = 'parse_failed'
     logger?.warn?.('[acp] consolidation llm output parse failed (attempt ' + (attempt + 1) + '/2)')
   }
-  return { ok: false, observations: [], error: lastError }
+  return { ok: false, observations: [], warnings: [], error: lastError }
 }
 
 // ===================== M3 B3：style 候选 → policy（guarded auto promotion） =====================
@@ -568,6 +583,11 @@ export function createConsolidator(opts = {}) {
           return { ran: true, digested: 0, observations: 0, reason: 'llm_failed' }
         }
         observations = derived.observations
+        // 护栏留痕（2026-09-25 方案 3）：模型给了无回链的观测 → 照写（append-only、fail-open），
+        // 但必须有一条可 grep 的降级日志。没有它，这条路今天只是「敞开着且没人知道」。
+        for (const w of derived.warnings ?? []) {
+          logger?.warn?.('[acp] acp:degraded observation_without_backlink ' + w)
+        }
       } else {
         observations = ruleObservations(evidences)
       }

@@ -22,6 +22,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { resolveDshHome } from '../src/home.mjs'
 import { DEFAULT_DB_NAME } from '../src/constants.mjs'
 import { openEvidenceLedger, deriveObservationAuthority } from '../src/store.mjs'
+import { classifyBacklink } from '../src/backlink.mjs'
 
 /** 允许导出的域（方案 4 的白名单）。画像三域**永不**在内。 */
 export const EXPORTABLE_DOMAINS = Object.freeze(['work', 'external_fact'])
@@ -143,6 +144,53 @@ export function enrichCandidate(c, evidence = []) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 回链档位（2026-09-25，方案 3）：把「无证据回链」这一句话拆成两档
+// ---------------------------------------------------------------------------
+// 此前 `无证据回链` 一视同仁，把两种完全不同的处境压成同一个字符串：
+//   · 外机导入的行 —— `scripts/ledger-import.mjs:82-85` **按设计**清空了 evidenceIds
+//     （evidence 不跨机，跨机引用必然悬空）。这是**结构事实**，不是本机数据缺陷。
+//   · 本机蒸馏产出的行却没有回链 —— 这才是**真异常**（W 机今天 0 条，护栏见 consolidate/store）。
+// 读的人（和后来的 agent）看到同一个「无证据回链」，只能理解成「我们这边的数据有问题」。
+//
+// **判据不放宽**：两类都仍然挡下。回链不可核验就进不了 staging —— 若放行，
+// 572 个簇会从「已知缺证据」变成「看起来有证据」（K 报告 §5.3 的陷阱：
+// 回填后 1393 个源侧 evidence id 在本机 100% 不可解析）。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 一个候选的回链档位：看它的**成员 observation**（候选池与 observation 物理分离，
+ * 档位只存在于 observation 侧）。
+ *   · 有任一成员是「本机缺回链」→ missing_backlink（真异常，优先报）
+ *   · 成员全部是「外机不可核验」→ unverifiable_foreign
+ *   · 无成员 / 认不出来 → null（调用方沿用旧文案，向后兼容）
+ * @param {object[]} observations - 成员 observation 行（camelCase）
+ * @returns {'missing_backlink'|'unverifiable_foreign'|null}
+ */
+export function candidateBacklinkTier(observations) {
+  const tiers = (Array.isArray(observations) ? observations : [])
+    .filter(Boolean)
+    .map((o) => classifyBacklink(o).tier)
+  if (tiers.includes('missing_backlink')) return 'missing_backlink'
+  if (tiers.length > 0 && tiers.every((t) => t === 'unverifiable_foreign')) return 'unverifiable_foreign'
+  return null
+}
+
+/**
+ * 「无回链」挡下理由：按档位分开说。**不改放不放**，只改怎么说。
+ * @param {object} c - 候选（可选带 backlinkTier）
+ * @returns {string}
+ */
+export function noBacklinkReason(c) {
+  if (c?.backlinkTier === 'unverifiable_foreign') {
+    return '不可核验（外机导入：回链按设计不跨机清空，引用的源侧 id 在本机不可解析）'
+  }
+  if (c?.backlinkTier === 'missing_backlink') {
+    return '无证据回链（本机产出的 observation 却无回链 —— 真异常，查蒸馏写入路径）'
+  }
+  return '无证据回链'
+}
+
 /**
  * 判据 A/B 的准入判定（纯函数，两处复刻的核心）。null = 放行，字符串 = 挡下理由。
  * @param {object} c - 候选（须含支持域与两侧 authority；缺字段 = 不可核验）
@@ -151,7 +199,7 @@ export function enrichCandidate(c, evidence = []) {
  */
 export function stagingBlockReason(c, opts = {}) {
   if (looksEphemeral(c.text)) return 'ephemeral（进度快照，B19 判据）'
-  if ((c.evidenceIds ?? []).length === 0) return '无证据回链'
+  if ((c.evidenceIds ?? []).length === 0) return noBacklinkReason(c)
   const domains = c.supportDomains ?? supportDomains(c.claimDomain, c.evidenceDomains)
   if (!looksCrossDomain(domains, opts.minDomains ?? CROSS_DOMAIN_MIN)) {
     return '域内复述（支撑域 ' + (domains.join('+') || '?') + ' < ' + (opts.minDomains ?? CROSS_DOMAIN_MIN)
@@ -266,7 +314,7 @@ export function buildExport(candidates, opts = {}) {
       })
       continue
     }
-    if ((c.evidenceIds ?? []).length === 0) { blocked.push({ id: c.id, domain: c.claimDomain, reason: '无证据回链' }); continue }
+    if ((c.evidenceIds ?? []).length === 0) { blocked.push({ id: c.id, domain: c.claimDomain, reason: noBacklinkReason(c) }); continue }
     records.push(toWeaverRecord(c, opts))
   }
   return { records, blocked }
@@ -376,12 +424,16 @@ function main() {
     // 判据 B 的另一侧：结论的 authority 来自**成员 observation 的 authority 列**
     // （那列是 evidence→observation 那一步按非放大算好的，见 store.deriveObservationAuthority）。
     // 2026-09-25 实测发现：不取它 → conclusionAuthority 恒为 null → 全部候选判「不可核验」。
-    const enriched = res.items.map((c) => enrichCandidate({
-      ...c,
-      observationAuthorities: (c.observationIds ?? [])
-        .map((oid) => ledger.getObservationById(oid)?.authority)
-        .filter(Boolean),
-    }, lookup(c.evidenceIds)))
+    const enriched = res.items.map((c) => {
+      const members = (c.observationIds ?? []).map((oid) => ledger.getObservationById(oid)).filter(Boolean)
+      return enrichCandidate({
+        ...c,
+        // 回链档位（方案 3）：候选自己不带 evidenceIds（physical separation），
+        // 档位在成员 observation 上 —— 在这里查好带下去，挡下理由才说得准。
+        backlinkTier: candidateBacklinkTier(members),
+        observationAuthorities: members.map((m) => m.authority).filter(Boolean),
+      }, lookup(c.evidenceIds))
+    })
     const stagingRes = buildStagingExport(enriched, { lib: opts.lib })
     if (opts.json) { console.log(JSON.stringify({ records, blocked, staging: stagingRes.records, stagingBlocked: stagingRes.blocked }, null, 2)); return }
     console.log('[export] state=' + opts.state + '  匹配 ' + res.total + ' 条'

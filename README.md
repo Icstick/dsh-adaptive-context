@@ -44,6 +44,7 @@ ACP 想解决的问题很简单：**让记忆像账本一样清楚**。每一条
 | **多源路由** | 多个记忆源并行召回，各自超时、互不拖累；LLM 任务可按用途配不同模型，主路挂了自动走备路 |
 | **审计与导出** | 所有关键操作留痕（谁/何时/为什么/附带数据）；JSONL 全量导出导入（证据/观察/候选/审计）；视图可一键重建并校验 |
 | **用户画像（Profile，2026-09-22）** | `user_model` 段的候选**不再来自原始消息流**，改由 Profile 物化视图供——由蒸馏出的 observation 构建，分 `stableFacts` / `preferences` 两组，每条可回链到证据与会话。按「支撑证据数 / 跨日复现 / 人工批准」加权排序（只动排序信号，不碰 authority） |
+| **回链可核验性（2026-09-25）** | 读侧把「外机导入、回链按设计清空」与「本机产出却没有回链」**分开**：前者是不可核验（外机）的结构事实（只计数不告警），后者才是真异常（告警 + 人工队列）。判据靠 id 与自身字段的自洽性（不写任何存量数据），实现 `src/backlink.mjs` |
 | **离线巩固（Dreaming，2026-09-22）** | 慢环：离线把证据与观察整理成稳定的候选结论。第一增量是**三件零 LLM 的确定性事**——归并（同域内同主体或二元组 Jaccard ≥ 阈值）、复现计数（跨会话/跨自然日）、遗忘（只出冷存清单，不删）。候选池与 observation **物理分离**，晋升必须过人工门 |
 
 ## 工作原理
@@ -290,6 +291,50 @@ recentState / interactionPatterns / inferredTraits   ← MVP 恒空（CONTRACTS 
   落在 `confidence` 上（**排序信号**）——`authority` 是写入时确定性声明的安全核心，加权绝不碰它
 
 `work` / `style` / `experience` / `external_fact` **不进画像**（分别归 work_state / expression / memory 段）。
+
+## 回链可核验性：本机缺回链 ≠ 外机不可核验（2026-09-25）
+
+**问题**。跨机同步上线（2026-09-22）后，W 机 1070 条 active observation 里有 **918 条**
+`evidence_ids = []`。此前所有读侧判据都把它们读成同一句话：「这条结论没有支撑证据」——
+也就是「本机数据有问题」。
+
+**实测结论**。那个读法是错的。两类必须分开：
+
+| 档 | 含义 | 判据 | 怎么处置 |
+|---|---|---|---|
+| `verifiable` | 有回链（给了解析器且全部在本机可解析） | — | 正常 |
+| `unverifiable_foreign` | **外机导入**：回链按设计清空，源侧 id 在本机不可解析 | id 由**源机**按原证据集派生，与本机空集不自洽 | **不是缺陷**。只计数、打 `foreign-unverifiable` tag，**不拦、不告警** |
+| `missing_backlink` | **本机产出却没有回链** | id 与空证据集**自洽**（= store 写入路径的形状） | **真异常**，告警 + 进人工队列 |
+| `unknown` | 信息不足（id 不是派生形状） | — | 不指控任何一方 |
+
+**为什么清空是设计**：`scripts/ledger-import.mjs:82-85` 导入时刻意清空 `evidenceIds` /
+`supersedes`——evidence 不跨机，跨机引用必然悬空，「留着比清掉更误导」。这一侧**不改**；
+本方案也**不写任何存量数据**（零数据风险是它的全部卖点）。
+
+**怎么在不写数据的前提下把两类分开**：observation 的 id 是按自身字段派生的
+（`obs_` + sha256(scope|subject|predicate|domain|text|JSON(evidenceIds)) 前 24 位）。
+本机写出的行，id 必然与它当前的 (..., evidenceIds) 自洽；跨机导入行走
+`export-import.mjs` 的**显式 id 原样 INSERT**，那个 id 是源机按原证据集算的、而回链已被清空
+→ 不自洽。W 机实测：152 条自洽（= 本机行，全部有回链）+ 918 条不自洽（= 导入行，全部无回链），**0 例外**。
+判据只有一份实现：`src/backlink.mjs`（`observationIdOf` 搬到这里，store 反过来 import 它，防两处漂移）。
+
+**落地**：
+
+- **放行闸门**（`src/release-gate.mjs`）加第八类 `backlink`——此前该文件里 grep `evidenceIds`
+  **0 命中**，七类三档**完全没有回链这一维**。语义：本机缺回链 → `hard_quarantine`；
+  外机不可核验 → `pass`（拦下它等于把跨机同步整个否掉，那是换一个错误）。
+  新签名 `gateVerdict(row, cfg, { resolvableEvidence })`。
+- **Dreaming 导出**：`无证据回链` 一分为二（`不可核验（外机导入…）` /
+  `无证据回链（本机产出…真异常）`）。**判据不放宽**——两类都仍然进不了 staging：
+  放行会让 572 个簇从「已知缺证据」变成「看起来有证据」（源侧 1393 个 evidence id 在本机 100% 不可解析）。
+- **写入侧护栏**：`parseObservations` 遇到 `evidenceIds: []` 逐条回 `warnings`；
+  `upsertObservation` 结果带 `backlink`（`missing_backlink` 时 `alert: true`）；consolidation 落
+  `[acp] acp:degraded observation_without_backlink ...` 日志；prompt 由「劝阻」改为**要求** ≥1 条回链。
+  写入仍**不拒绝**（账本 append-only、fail-open）——护栏是留痕，不是拦死。
+- **只读体检**：`ledger-audit.mjs` 新增 `[回链]` 一节，**只有 `missing_backlink` 进告警**。
+- **打分一律不动**：`backlinkTier` 只标注在候选上。空回链的候选本来就有
+  `evidenceSupportScore → confidence(0.6)` 的兜底（`composer.mjs:146`），**不存在「被压到 0」**；
+  实测画像权重 min 0.6 / avg 0.604 / max 0.8。
 
 ## 数据位置与备份
 

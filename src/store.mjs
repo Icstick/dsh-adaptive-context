@@ -23,6 +23,9 @@ import {
   evidenceIdOf, hashHex,
 } from './constants.mjs'
 import { assertAuthorityConsistent } from './governance.mjs'
+// 回链档位（2026-09-25 方案 3）：读侧判「本机缺回链」还是「外机不可核验」，靠的就是
+// id 与自身字段的自洽性 —— 所以 observationIdOf 必须与写入路径**同一份实现**，不能各写一份。
+import { observationIdOf, classifyBacklink } from './backlink.mjs'
 import { createAuditStore } from './audit.mjs'
 import { createCandidateStore } from './candidate.mjs'
 import { createRuleStore } from './rule.mjs'
@@ -479,11 +482,16 @@ export function openEvidenceLedger(opts = {}) {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
-  /** 稳定派生 id：同键 + 同正文 + 同证据集重派生天然幂等（重复写不产生新行） */
-  function observationIdOf({ scopeId, subject, predicate, claimDomain, text, evidenceIds }) {
-    return 'obs_' + hashHex([
-      scopeId, subject, predicate, claimDomain, text, JSON.stringify(evidenceIds ?? []),
-    ].join('|')).slice(0, 24)
+  // 稳定派生 id：同键 + 同正文 + 同证据集重派生天然幂等（重复写不产生新行）。
+  // **实现已搬到 src/backlink.mjs**（2026-09-25 方案 3）并在此 import —— 读侧回链档位判据
+  // 的核心就是「id 与自身字段是否自洽」，两处各写一份必然漂移、判据静默失效。
+  // 口径不变：'obs_' + sha256(scope|subject|predicate|domain|text|JSON(evidenceIds)) 前 24 位。
+
+  /** 行 → 回链档位（只标注，不参与任何校验/写入决策） */
+  function backlinkOf(row) {
+    if (!row) return null
+    const v = classifyBacklink(row)
+    return { tier: v.tier, label: v.label, foreign: v.foreign, reason: v.reason, alert: v.tier === 'missing_backlink' }
   }
 
   /**
@@ -521,7 +529,12 @@ export function openEvidenceLedger(opts = {}) {
 
     // 幂等：同 id（同键+同正文+同证据）重写直接返回，不自 supersede
     const byId = db.prepare('SELECT * FROM observation WHERE id = ?').get(id)
-    if (byId) return { inserted: false, id, row: toObservation(byId), supersededId: null }
+    if (byId) {
+      // 幂等命中：档位按**库里那一行**判，不按入参判 —— 外机导入行（显式 id + 空回链）
+      // 再走一次 upsert 时，不能被误报成本机缺回链。
+      const existing = toObservation(byId)
+      return { inserted: false, id, row: existing, supersededId: null, backlink: backlinkOf(existing) }
+    }
 
     // 冲突：同键且 active 的旧行（事务内：冲突翻转 + 插入 + audit 原子提交）
     db.exec('BEGIN IMMEDIATE')
@@ -554,7 +567,10 @@ export function openEvidenceLedger(opts = {}) {
         payload: { supersededId },
       })
       db.exec('COMMIT')
-      return { inserted: true, id, row: getObservationById(id), supersededId }
+      const row = getObservationById(id)
+      // 护栏（方案 3 的 B 部分）：本机写入路径产出无回链的 observation 时**不拒绝**
+      // （账本 append-only、fail-open），但把档位与告警随结果返回，让调用方必须看见。
+      return { inserted: true, id, row, supersededId, backlink: backlinkOf(row) }
     } catch (err) {
       db.exec('ROLLBACK')
       throw err

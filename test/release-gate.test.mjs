@@ -151,3 +151,61 @@ test('误杀回归：第一批已放行的真实好行，新闸门一律 pass', 
     assert.equal(v.decision, 'pass', t + ' → ' + JSON.stringify(v.hits))
   }
 })
+// ===================== ⑧ 回链维度（2026-09-25，方案 3） =====================
+// 七类三档此前**完全没有回链这一维**（release-gate.mjs 里 grep evidenceIds → 0 命中）：
+// 918 条外机导入行（回链按设计清空）与本机缺回链行在闸门里长得一模一样。
+// 这一档把它们分开——**本机缺回链才是异常**，外机不可核验不是。
+
+let bl = {}
+try { bl = await import('../src/backlink.mjs') } catch { /* 未实现 → 下面的断言红得可读 */ }
+
+/** 本机产出、却没有回链：id 由空证据集派生（= store 写入路径的形状） */
+const localNoBacklink = (over = {}) => {
+  const row = { scopeId: 'user-global', subject: '存储', predicate: '偏好', claimDomain: 'work', text: '本机无回链行', evidenceIds: [], ...over }
+  assert.equal(typeof bl.observationIdOf, 'function', 'src/backlink.mjs 必须导出 observationIdOf')
+  return { ...row, id: bl.observationIdOf(row) }
+}
+
+/** 外机导入行：id 由**源机的原证据集**派生，回链被导入路径清空（ledger-import.mjs:84 的签名） */
+const foreignRow = (over = {}) => {
+  const row = { scopeId: 'user-global', subject: '用户', predicate: '偏好', claimDomain: 'user_preference', text: '外机来的行', evidenceIds: [], ...over }
+  return { ...row, id: bl.observationIdOf({ ...row, evidenceIds: ['ev_from_A_1', 'ev_from_A_2'] }) }
+}
+
+test('⑧ 回链：本机产出却无回链 → hard_quarantine（真异常，进人工队列）', () => {
+  const v = gateVerdict(localNoBacklink({ text: '用户偏好把配置和代码分开' }))
+  assert.equal(v.class, 'backlink')
+  assert.equal(v.decision, 'hard_quarantine')
+  assert.equal(v.backlink.tier, 'missing_backlink')
+})
+
+test('⑧ 回链：外机导入的不可核验 → pass（不是缺陷，不得当噪声拦）', () => {
+  const v = gateVerdict(foreignRow({ text: '用户指定当前 session 处理范围' }))
+  assert.equal(v.decision, 'pass', JSON.stringify(v.hits))
+  assert.equal(v.backlink.tier, 'unverifiable_foreign')
+  assert.equal(v.backlink.foreign, true)
+  assert.ok(v.tags.includes('foreign-unverifiable'), '要能在报告里看见「这条不可核验」，tags=' + JSON.stringify(v.tags))
+  assert.equal(v.class, null, '不是七类噪声，class 保持 null')
+})
+
+test('⑧ 回链：回链非空但本机解析不到 → 也不当本机缺陷', () => {
+  const row = foreignRow({ text: 'x' })
+  const withIds = { ...row, evidenceIds: ['ev_from_A_7'] }
+  const v = gateVerdict(withIds, GATE_CONFIG, { resolvableEvidence: new Set(['ev_local_only']) })
+  assert.equal(v.backlink.tier, 'unverifiable_foreign')
+  assert.equal(v.decision, 'pass')
+  const ok = gateVerdict({ ...withIds, evidenceIds: ['ev_local_only'] }, GATE_CONFIG, { resolvableEvidence: new Set(['ev_local_only']) })
+  assert.equal(ok.backlink.tier, 'verifiable')
+  assert.equal(ok.decision, 'pass')
+})
+
+test('⑧ 回链：无溯源信息的行一律 unknown —— 旧调用点（无 id / 无 evidenceIds）行为不变', () => {
+  const v = gateVerdict(row())
+  assert.equal(v.backlink.tier, 'unknown')
+  assert.equal(v.decision, 'pass')
+  assert.equal(v.tags.includes('foreign-unverifiable'), false, '不能凭「缺信息」就往上报外机')
+  // 七类判据不受新维度影响（回归锚点）
+  assert.equal(d({ text: '用户同意继续当前任务' }), 'hard_quarantine')
+  assert.equal(cls({ text: 'User referred to the assistant as 姐姐 when asking for help.' }), 'english')
+})
+

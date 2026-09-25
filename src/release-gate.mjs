@@ -16,10 +16,26 @@
 //      正好是「这个锚点只在某台机器/某个时刻成立」。豁免条款与它们的分工不能混。
 //
 // 处置不对称（云端的核心取舍，本地实测同意）：漏放会污染所有下游机，误杀只花审核工时。
+//
+// 2026-09-25（方案 3）加第八类 `backlink`（溯源维度，**不是**噪声维度）：起因是诊断报告
+// D:/DSH_workspace/research-2026-09-25/K-evidence-ids-diagnosis.md —— W 机 918 条 active
+// observation 的 evidence_ids='[]' **全部**来自跨机导入（scripts/ledger-import.mjs:82-85
+// 按设计清空：evidence 不跨机，跨机引用必然悬空），却被所有读侧判据当成「本机数据缺陷」。
+// 分层判据只有一份实现，在 src/backlink.mjs；本文件只接它一档、不改任何存量数据。
 
-/** 七类的优先级：同一条命中多类时取首个 hard 作主因，其余进 tags。 */
+import { classifyBacklink } from './backlink.mjs'
+
+/**
+ * 七类噪声 + 一档溯源（2026-09-25 方案 3）。同一条命中多类时取首个 hard 作主因，其余进 tags。
+ *
+ * `backlink` **不是噪声类**，是溯源类：它管「这条结论的回链能不能核验」，与上面七类的
+ * 措辞/时效判据正交。此前本闸门里 grep `evidenceIds` → **0 命中**——七类三档完全没有回链
+ * 这一维，于是 918 条跨机导入行（回链按设计清空，见 ledger-import.mjs:82-85）与本机缺回链行
+ * 在闸门眼里长得一模一样。加在**末尾**：同档 tie-break 时优先级最低，不改变七类既有裁决。
+ */
 export const GATE_CLASSES = Object.freeze([
   'english', 'selfref', 'ephemeral', 'env-bound', 'one-shot-path', 'stale-version', 'empty-emotion',
+  'backlink',
 ])
 
 /** 阈值（云端「阈值皆配置」）：本对象是唯一数字来源，规则里不许再写死数字。 */
@@ -39,6 +55,9 @@ export const GATE_CONFIG = Object.freeze({
 })
 
 export const GATE_DECISIONS = Object.freeze(['pass', 'soft_tag', 'hard_quarantine'])
+
+/** ⑧ 回链维度复用的分层实现（不要把判据抄一份到这里——见 src/backlink.mjs 的说明）。 */
+export { BACKLINK_TIERS, classifyBacklink, summarizeBacklinks } from './backlink.mjs'
 
 /** 配置校验：坏配置要早失败，别让它静默退化成「全放行」。 */
 export function assertGateConfig(cfg = GATE_CONFIG) {
@@ -296,10 +315,15 @@ const downgrade = (lvl) => (lvl === 'hard' ? 'soft' : 'pass')
  * 单条 observation 的闸门判定（统一接口：class / decision / evidence_span / confidence）。
  * @param {object} row 账本行（text / subject 必读；source_locale、sessionTailDistance 可选）
  * @param {typeof GATE_CONFIG} [cfg]
+ * @param {object} [opts]
+ * @param {Set<string>|((id:string)=>boolean)} [opts.resolvableEvidence]
+ *        本机可解析的 evidence id 集合（⑧ 回链维度用；不给也能判外机/本机那一档，
+ *        只是「有回链的行是否真的取得回来」无法核验 —— 见 src/backlink.mjs）
  * @returns {{class:string|null, decision:'pass'|'soft_tag'|'hard_quarantine', evidence_span:string,
- *            confidence:number, anchors:Array<{kind:string,span:string}>, tags:string[], hits:Array<object>}}
+ *            confidence:number, anchors:Array<{kind:string,span:string}>, tags:string[], hits:Array<object>,
+ *            backlink:{tier:string,label:string,foreign:boolean,checked:boolean,reason:string}}}
  */
-export function gateVerdict(row = {}, cfg = GATE_CONFIG) {
+export function gateVerdict(row = {}, cfg = GATE_CONFIG, opts = {}) {
   assertGateConfig(cfg)
   const text = String(row.text ?? '')
   const subject = String(row.subject ?? '')
@@ -318,6 +342,16 @@ export function gateVerdict(row = {}, cfg = GATE_CONFIG) {
   push(classifyOneShotPath(pathView, cfg))
   push(classifyStaleVersion(body, cfg))
   push(classifyEmptyEmotion(body, cfg))
+  // ⑧ 回链（2026-09-25 方案 3，溯源维度）：判据是「这条结论的回链能不能在本机核验」。
+  //   · 本机产出却没有回链 → hard（真异常，进人工队列；这是唯一该拦的一类）
+  //   · 外机导入、回链按设计清空 / 引用的源侧 id 在本机不可解析 → **pass**，
+  //     只留一个 'foreign-unverifiable' tag 供报告统计。把这一类拦下就等于把跨机同步
+  //     整个否掉——那不是解法，是换一个错误。
+  //   · 信息不足（id 非派生形状）→ unknown，既不告警也不指控（旧调用点行为不变）。
+  const backlink = classifyBacklink(row, opts)
+  if (!cfg.disabled.includes('backlink') && backlink.tier === 'missing_backlink') {
+    push({ cls: 'backlink', level: 'hard', span: backlink.reason.slice(0, 60), confidence: 0.9, tags: ['local-no-backlink'] })
+  }
 
   const exempt = anchors.length > 0
   const graded = hits
@@ -331,6 +365,8 @@ export function gateVerdict(row = {}, cfg = GATE_CONFIG) {
   const decision = !main ? 'pass' : (main.level === 'hard' ? 'hard_quarantine' : 'soft_tag')
   // 绝对路径只进 tag，不改判：它是「人工该看一眼」的提示，不是可自动判定的噪声。
   const pathTag = ABS_PATH_ANY_RE.test(pathView) || NIX_PATH_ANY_RE.test(pathView) ? ['abs-path?'] : []
+  // 「不可核验（外机）」是结构事实，**不是**噪声：不改判、不进 hits，只打 tag 让报告能统计。
+  const backlinkTag = backlink.tier === 'unverifiable_foreign' ? ['foreign-unverifiable'] : []
   return {
     class: main ? main.cls : null,
     decision,
@@ -338,8 +374,9 @@ export function gateVerdict(row = {}, cfg = GATE_CONFIG) {
     confidence: main ? main.confidence : 1,
     anchors,
     strippedSpans: spans.length,
-    tags: [...new Set([...graded.flatMap((h) => h.tags ?? []), ...pathTag])],
+    tags: [...new Set([...graded.flatMap((h) => h.tags ?? []), ...pathTag, ...backlinkTag])],
     hits: graded.map((h) => ({ class: h.cls, level: h.level, span: String(h.span).slice(0, 40), byAnchor: !!h.byAnchor })),
+    backlink,
   }
 }
 

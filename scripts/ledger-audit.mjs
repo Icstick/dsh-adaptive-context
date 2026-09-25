@@ -38,6 +38,8 @@ import { planArchival } from '../src/dream.mjs'
 import { sectionOf } from '../src/composer.mjs'
 import { buildProfile, profileRefs, isProfileDomain } from '../src/profile.mjs'
 import { authorityMayClaimDomain } from '../src/governance.mjs'
+// 回链可核验性分层（2026-09-25 方案 3）：判据只有一份实现，**从 src 导入，不在这里复制**。
+import { summarizeBacklinks, localEvidenceIds } from '../src/backlink.mjs'
 import { estimateTokens, LINE_LABEL_TOKENS } from '../src/budget.mjs'
 
 // 生产配额（cordis.patch.yml 的 adaptive-context.sectionQuota，2026-09-22 实测值）。
@@ -212,10 +214,10 @@ export function auditLedger(db, opts) {
       }
     }
   }
-  const profileSource = all("SELECT id, subject, predicate, claim_domain, text, authority, evidence_ids, observed_at, created_at"
+  const profileSource = all("SELECT id, scope_id, subject, predicate, claim_domain, text, authority, evidence_ids, observed_at, created_at"
     + " FROM observation WHERE state='active'")
     .map((r) => ({
-      id: r.id, subject: r.subject, predicate: r.predicate, claimDomain: r.claim_domain,
+      id: r.id, scopeId: r.scope_id, subject: r.subject, predicate: r.predicate, claimDomain: r.claim_domain,
       text: r.text, authority: r.authority, evidenceIds: JSON.parse(r.evidence_ids || '[]'),
       observedAt: r.observed_at, createdAt: r.created_at,
     }))
@@ -238,6 +240,23 @@ export function auditLedger(db, opts) {
       : null,
     top: profileRows.slice().sort((a, b) => b.weight - a.weight).slice(0, 5)
       .map((r) => ({ id: r.observationId, weight: r.weight, signals: r.signals, subject: r.subject })),
+  }
+
+  // ---------- 回链可核验性（2026-09-25 方案 3） ----------
+  // 为什么要单独一节：**把「外机按设计清空」与「本机缺回链」分开报**。
+  // 前者是跨机同步的结构事实（不是缺陷），后者才是异常 —— 此前所有读侧把两者混成一句
+  // 「无证据回链」，于是 W 机 918 条导入行被当成「本机数据缺陷」（诊断：K-evidence-ids-diagnosis.md）。
+  // 本节的告警口径：**只有 missing_backlink 进 alerts**；外机不可核验只计数、不告警。
+  const backlinkRows = all("SELECT id, scope_id, subject, predicate, claim_domain, text, evidence_ids, state FROM observation")
+    .map((r) => ({
+      id: r.id, scopeId: r.scope_id, subject: r.subject, predicate: r.predicate, claimDomain: r.claim_domain,
+      text: r.text, evidenceIds: JSON.parse(r.evidence_ids || '[]'), state: r.state,
+    }))
+  const backlinkOpts = { resolvableEvidence: localEvidenceIds({ db }) }
+  const backlink = {
+    // active 是判据真正看的那一档（读侧只取 state='active'）
+    ...summarizeBacklinks(backlinkRows.filter((r) => r.state === 'active'), backlinkOpts),
+    allStates: summarizeBacklinks(backlinkRows, backlinkOpts).total,
   }
 
   // ---------- observation ----------
@@ -284,6 +303,7 @@ export function auditLedger(db, opts) {
     },
     injection,
     observation,
+    backlink,
     profile,
   }
 }
@@ -348,6 +368,20 @@ export function render(rep) {
         + ' 日' + t.signals.days + (t.signals.confirmed ? ' 已批准' : '') + '  ' + t.subject + '  ' + t.id)
     }
   }
+  L.push('')
+  L.push('[回链] 可核验性分层（active；2026-09-25 方案 3）')
+  L.push('  可核验 ' + rep.backlink.byTier.verifiable
+    + ' · 不可核验（外机）' + rep.backlink.byTier.unverifiable_foreign
+    + ' · 本机缺回链 ' + rep.backlink.byTier.missing_backlink
+    + ' · 不可判定 ' + rep.backlink.byTier.unknown
+    + '  （共 ' + rep.backlink.total + ' 条）')
+  if (rep.backlink.alertCount > 0) {
+    L.push('  ⚠ 本机缺回链 ' + rep.backlink.alertCount + ' 条 —— 真异常（本机蒸馏产出应当 100% 有回链）：')
+    for (const a of rep.backlink.alerts.slice(0, 10)) L.push('     ' + a.id)
+  } else {
+    L.push('  本机缺回链 0 条（本机蒸馏产出 100% 有回链）✓')
+  }
+  L.push('  读法：不可核验（外机）是跨机同步的结构事实，不是缺陷 —— 它不该出现在告警里。')
   L.push('')
   L.push('[observation]')
   L.push('  ' + rep.observation.byState.map((o) => o.state + ' ' + o.n).join(' · '))
