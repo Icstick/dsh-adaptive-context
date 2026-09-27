@@ -510,3 +510,41 @@ A0 解决的是**另一半**——画像域的 approved 终于有了消费者（
 > 附带修掉一个措辞 bug（同日，提交 510d9be）：`buildExport` 的 blocked 不带 reason，输出层用
 > 「画像域，永不出 ACP」兜底，于是 `experience`（只是不在白名单）被误标成画像域 —— 46 条挡下里
 > 大半是它。现已按 `BLOCKED_DOMAINS` 判定并区分两种理由，补了测试锁住。
+
+---
+
+## 14. 云端 staging 清库与判据 B 复活实测（2026-09-26）
+
+**背景**：§11.2 的「接纳 / 精馏」双任务落地后，云端 staging 里积了 **7 条旧格式行**（`toStagingRecord` 补 `occurrences` 之前导出的）+ 1 条新格式行。旧行没有 `occurrences` 键 → **判据 B 恒为 0**，是结构性失效而不是「数据不够」。
+
+**一次清库**（全部在 `/mnt/datadisk/weaver`）：
+
+| 步 | 动作 | 结果 |
+|---|---|---|
+| 备份 | `VACUUM INTO` → `backups/staging.db.bak-20260926-1827` | 一致性快照（不是裸 cp） |
+| 归档旧行 | 7 条 → `archive/staging-stale-20260926-1827.jsonl` | 可逐条还原 |
+| 归档旧源文件 | `inbound-acp/{a/20260924-2000, w/20260924-2040, w/20260925-2110}.jsonl` → `archive/inbound-acp-stale-20260926/` | 3 个文件 |
+| 删行 | 8 → 1 | |
+| 重新导出 | `dream-export --cloud-out --device w` → `inbound-acp/w/20260926-1825.jsonl` | 1 条 |
+| 接纳 | `tools/acp-accept.sh` rc=0 | 幂等跳过 1 · 库内 1 |
+
+**判据 B 的差分验证（这一轮的关键证据）**：
+
+| `--min-occ` | 提案数 |
+|---|---|
+| 1 | **1 条**（`occurrences>=1`，建议库 work-skill） |
+| 2 | 0 |
+| 3（默认） | 0 |
+
+阈值一动提案就跟着动 ⇒ `occurrences` **已被真实读取**。修复前该字段恒 0，`--min-occ 1` 也提不出任何东西。
+「判据生效」的判据是**差分**，不是「跑出来没报错」。
+
+**两个实测踩到的坑**（已进 dev-lessons）：
+
+1. **只删行不归档源文件 = 白清**。接纳的幂等键是 `(slot, cand_id, content_hash)` 且用 `INSERT OR IGNORE`——行删了、文件还在，下一轮 accept 会把它们**原样复活**。
+2. **改过记录结构之后，同一 cand_id 会多出一条历史行**。本轮修复给 staging 记录加了判定字段（`crossDomain` / `supportDomains` / 两侧 authority），content_hash 随之改变 → 不判重 → 插成第二行（清库途中库里一度是 2 条）。处置口径：**同一 `(slot, cand_id)` 只保留最新一条**，且先归档源文件、再删行。
+
+**留给将来同类操作的一条判据**：**任何靠内容 hash 判重的表，改过记录结构之后都要当成「全表键失效」处理**——hash 变了，判重就失效了。
+
+**遗留**：a 槽现为空。A 机（至 2026-10-10 不在线）回来后需用新版 `dream-export` 重新导出。今天不影响任何判据——跨机复现本来就是 0 条。
+
