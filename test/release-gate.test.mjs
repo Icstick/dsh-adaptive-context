@@ -209,3 +209,27 @@ test('⑧ 回链：无溯源信息的行一律 unknown —— 旧调用点（无
   assert.equal(cls({ text: 'User referred to the assistant as 姐姐 when asking for help.' }), 'english')
 })
 
+// ── 2026-09-27 补强：会话交互通报（S7）与状态变更叙述（S8）────────────────────
+// 起因：账本体检发现跨机导入的 user 域 observation 里混着「用户表示已经做了重启，
+// 要求查看结果。」「用户将工具审批策略从 never 改为 ask。」这类**会话事件叙述** ——
+// 它们不是关于用户的耐久属性，但 S1–S6 一条都不命中。
+// 标定（真实账本只读，495 条导入件）：新增两族使 39 条 pass→soft_tag（7.9%），
+// 既有裁决改动 0 条，回归集 0 误杀。单族命中只到 soft（进人工低优先队列），不进 HARD_SINGLE。
+test('③b 会话交互通报 / 状态变更叙述：进软队列，耐久表态不受影响', () => {
+  // 目标类：第三人称转述一次会话里的动作或表态
+  assert.equal(d({ text: '用户表示已经做了重启，要求查看结果。' }), 'soft_tag')
+  assert.equal(cls({ text: '用户表示已经做了重启，要求查看结果。' }), 'ephemeral')
+  assert.equal(d({ text: '用户在会话中回复“批准”，表示同意当前请求。' }), 'soft_tag')
+  assert.equal(d({ text: '用户同意进行升级操作' }), 'soft_tag')
+  assert.equal(d({ text: '用户表示图片已导入，可供相关测试/查看使用。' }), 'soft_tag')
+  // 目标类：配置/策略的状态变更叙述（实测里同一条重复 5 次）
+  assert.equal(d({ text: '用户将工具审批策略从 never 改为 ask。' }), 'soft_tag')
+  assert.equal(d({ text: '审批策略从 ask 改为 never' }), 'soft_tag')
+  // 不得误伤：耐久属性/偏好的表述方式完全不同
+  assert.equal(d({ text: '用户相当依赖本地环境与本地文件，包括 skill、知识库等。' }), 'pass')
+  assert.equal(d({ text: '用户希望应用启动时像普通 exe 一样不弹出 pwsh/终端' }), 'pass')
+  assert.equal(d({ text: '用户把待办都落成可追踪文档再推进' }), 'pass')
+  assert.equal(d({ text: '倾向将分支都合并到main，只保留main' }), 'pass')
+  // 锚点豁免仍适用于 ephemeral：带外部锚点的行降一级（soft→pass）
+  assert.equal(d({ text: '用户将审批策略改为 ask，见 https://example.com/x' }), 'pass')
+})
