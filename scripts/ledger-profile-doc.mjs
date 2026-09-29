@@ -20,6 +20,8 @@ import { openEvidenceLedger } from '../src/store.mjs'
 import { buildProfile } from '../src/profile.mjs'
 import { gateVerdict } from '../src/release-gate.mjs'
 import { resolveDshHome } from '../src/home.mjs'
+import { attachQuotes, planSedimentation } from '../src/chapter.mjs'
+import { planArchival } from '../src/dream.mjs'
 
 export const PROFILE_DOC_DOMAINS = Object.freeze(['user_fact', 'user_preference'])
 
@@ -165,6 +167,52 @@ export function renderProfileDoc(profile, opts = {}) {
       L.push('')
     }
   }
+  const ch = opts.chapter
+  if (ch) {
+    L.push('## 原话核对（user-line-gate）')
+    L.push('')
+    L.push('> 判据出自 Herta：**用户台词必须是真实消息的连续引用**，不许把转述当原话。')
+    L.push('> 这一节不判真假，只标「这条引了多少原话、本机能核到什么程度」。**核不到 ≠ 伪造** ——')
+    L.push('> 外机导入的条目按设计不带回链（src/backlink.mjs 的分层判据）。')
+    L.push('')
+    const qs = ch.quotes ?? []
+    const withQ = qs.filter((x) => (x.quotes ?? []).length > 0)
+    // 三类分开：只有第二类是真异常 —— 有回链，却对不上自己引的那句。
+    const rows3 = { ok: [], foreign: [], mismatch: [] }
+    for (const x of withQ) {
+      const anyOk = x.quotes.some((q) => q.supported)
+      if (anyOk) rows3.ok.push(x)
+      else if ((x.evidenceCount ?? 0) === 0) rows3.foreign.push(x)
+      else rows3.mismatch.push(x)
+    }
+    L.push('- 有引文的条目 **' + withQ.length + '** / 参与核对 ' + qs.length + '（纯转述 ' + (qs.length - withQ.length) + ' 条）')
+    L.push('- 逐字可核 ' + rows3.ok.length + ' · 外机导入（本机无证据，按设计）' + rows3.foreign.length + ' · **有回链却对不上 ' + rows3.mismatch.length + '**')
+    if (rows3.mismatch.length) {
+      L.push('')
+      L.push('### ⚠️ 引文对不上（本机有证据，但证据里没有这句话）')
+      L.push('')
+      for (const x of rows3.mismatch.slice(0, 8)) {
+        for (const q of x.quotes.filter((q) => !q.supported)) L.push('- 「' + norm(q.text).slice(0, 80) + '」　*(id ' + String(x.id).slice(0, 10) + ' · 证据 ' + String(x.evidenceCount) + ' 条)*')
+      }
+    }
+    if (rows3.ok.length) {
+      L.push('')
+      for (const x of rows3.ok.slice(0, 5)) for (const q of x.quotes.filter((q) => q.supported)) L.push('- ✅ 逐字可核：「' + norm(q.text).slice(0, 80) + '」　*(id ' + String(x.id).slice(0, 10) + ')*')
+    }
+    L.push('')
+    L.push('## 冷存前的沉淀检查（遗忘前先落笔）')
+    L.push('')
+    L.push('> 条目会被 dream 归档。归档**不删数据**，但它会从这份画像里消失。')
+    L.push('> 这一节列的是「即将冷存、而画像里还没有它」的用户域结论 —— **先沉淀，再冷存**。')
+    L.push('')
+    const sed = ch.sedimentation
+    if (sed) {
+      L.push('- 即将冷存 ' + sed.checked + ' 条；画像未覆盖 **' + sed.missing.length + '** 条')
+      for (const m of sed.missing.slice(0, 10)) L.push('  - 〔' + m.claimDomain + '〕' + norm(m.text).slice(0, 100) + '　*(id ' + String(m.id).slice(0, 10) + ')*')
+      if ((sed.missing ?? []).length === 0) L.push('- 没有缺口：要冷存的都已在画像里。')
+    }
+    L.push('')
+  }
   return L.join('\n')
 }
 
@@ -178,7 +226,34 @@ function main() {
       "FROM observation WHERE state = 'active' AND claim_domain IN (" + ph + ") ORDER BY observed_at",
     ).all(...PROFILE_DOC_DOMAINS)
     const profile = buildProfile(rowsToObservations(rows), { scopeId: 'user-global', generatedAt: new Date().toISOString() })
-    const doc = renderProfileDoc(profile, { host: opts.host, generatedAt: new Date().toISOString(), source: path.join(opts.dir, 'acp-ledger.db') })
+    // ── chapter：原话核对 + 冷存前沉淀检查（2026-09-29，对应 WP3 剩下两条）──
+    const evById = new Map(ledger.db.prepare('SELECT id, content FROM evidence').all().map((e) => [e.id, { content: e.content ?? '' }]))
+    const allObs = ledger.db.prepare('SELECT id, text, claim_domain, state, created_at, evidence_ids FROM observation').all()
+      .map((r) => ({
+        id: r.id,
+        text: String(r.text ?? ''),
+        claimDomain: r.claim_domain,
+        state: r.state,
+        createdAt: Number(r.created_at ?? 0),
+        evidenceIds: (() => { try { return JSON.parse(r.evidence_ids ?? '[]') } catch { return [] } })(),
+      }))
+    const bodyEntries = [...(profile?.stableFacts ?? []), ...(profile?.preferences ?? [])]
+      .map((it) => ({ id: it.observationId ?? it.id ?? '', text: it.text ?? '', evidenceIds: it.evidenceIds ?? [] }))
+    const archival = planArchival({
+      observations: allObs.map((o) => ({ id: o.id, state: o.state, createdAt: o.createdAt })),
+      evidence: ledger.db.prepare('SELECT id, state, updated_at FROM evidence').all()
+        .map((e) => ({ id: e.id, state: e.state, updatedAt: Number(e.updated_at ?? 0) })),
+    })
+    const chapter = {
+      quotes: attachQuotes(bodyEntries, evById),
+      sedimentation: planSedimentation({
+        observations: allObs,
+        archivalIds: archival.observations,
+        representedTexts: bodyEntries.map((x) => x.text),
+      }),
+      archivalStats: archival.stats,
+    }
+    const doc = renderProfileDoc(profile, { host: opts.host, generatedAt: new Date().toISOString(), source: path.join(opts.dir, 'acp-ledger.db'), chapter })
     if (opts.out) {
       writeFileSync(opts.out, doc, 'utf8')
       console.log(JSON.stringify({ wrote: opts.out, bytes: Buffer.byteLength(doc, 'utf8'), lines: doc.split('\n').length, stableFacts: profile.stableFacts.length, preferences: profile.preferences.length }, null, 1))

@@ -13,6 +13,7 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 - `src/index.mjs` —— 插件入口（服务装配、生命周期）
 - `src/service.mjs` / `store.mjs` —— 服务定义 / SQLite 账本存储（node:sqlite 单连接，append-only）。**v7 起有 8 张表**：evidence / observation / candidate / candidate_events / audit / rule / **candidate_memory / dream_run**
 - `src/views.mjs` / `composer.mjs` / `budget.mjs` —— 读视图 / 上下文组装 / 预算控制
+- `src/chapter.mjs` —— **「关于你的那一章」的两件纯函数**（2026-09-29，对 Herta 的「遗忘前先沉淀」与 user-line-gate）：`attachQuotes`（条目引用到的原话 + 本机能否逐字核到）与 `planSedimentation`（即将冷存、画像却没接住的用户域结论）。**只读只判定**，不写账本；渲染在 `scripts/ledger-profile-doc.mjs` 的 USER.md 末两节。
 - `src/backlink.mjs` —— **读侧回链可核验性分层**（2026-09-25 方案 3）：`verifiable` / `unverifiable_foreign`（外机导入按设计清空，**不是缺陷**）/ `missing_backlink`（本机产出却无回链，**真异常**）/ `unknown`。判据 = observation id 与自身字段是否自洽（`observationIdOf` 在这里，store 反过来 import 它）。纯读、只标注，**不写任何数据、不改任何打分**
 - `src/candidates.mjs` —— 各来源行 → composer 候选的纯映射（`observationToCandidate`；从 index.mjs 分出以避免 index↔profile 环）
 - `src/profile.mjs` —— **Profile 物化视图**（CONTRACTS §4 五数组，A0）。由 observation 构建，**不落盘、每步现算**；`computeProfileWeight` 按支撑强度/复现天数/人工批准加权（只动 confidence，不碰 authority）
