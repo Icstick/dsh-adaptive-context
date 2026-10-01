@@ -52,8 +52,7 @@ test('摄入链端到端：A1 不收 assistant / C 落 subagent / B1 直写缺�
     observationInjection: false,
     startupRebuild: false,
     subagentDowngrade: true, // Config 默认 true；见上面注释
-    memosEnabled: false,
-    recallProviders: [],
+    recallProviders: [],     // 显式无 provider（2026-10-01 起也是缺省语义）
   })
 
   const emit = (session, event) => {
@@ -104,7 +103,7 @@ test('subagentDowngrade 缺省兜底：配置未给该键时仍降权（不依�
   t.after(() => { disposeAll(); rmSync(dir, { recursive: true, force: true }) })
 
   // 故意**不传** subagentDowngrade —— 模拟宿主没套 Config 默认值的路径
-  apply(ctx, { ledgerDir: dir, observationInjection: false, startupRebuild: false, memosEnabled: false, recallProviders: [] })
+  apply(ctx, { ledgerDir: dir, observationInjection: false, startupRebuild: false, recallProviders: [] })
   const sub = { id: 'sub-2', header: { origin: 'subagent' } }
   for (const fn of handlers.get('session/event') ?? []) {
     fn(sub, { type: 'user/message', seq: 1, content: '你是 YY 代理，任务是…' })

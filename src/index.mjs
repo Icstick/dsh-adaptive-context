@@ -74,15 +74,14 @@ export const Config = z.object({
   // 避免父任务书冒充用户指令。
   subagentDowngrade: z.boolean().default(true).volatile(),
   debug: z.boolean().default(false).volatile(),
-  // MemOS RecallProvider（T3 P0-3）：semantic 分来源，MVP 实验接入
-  memosBaseUrl: z.string().default('http://127.0.0.1:18801').volatile(),
-  memosEnabled: z.boolean().default(true).volatile(),
-  // RecallProviders 注册表（M3 A1）：多记忆源并行召回；缺省（undefined）自动用
-  // memosBaseUrl/memosEnabled 构造默认 memos 项（向后兼容，M2 行为不变）；
-  // 显式 [] 表示不启用任何 recall provider。
-  // 注：用 z.any() 走透传——schemastery 3.18 无 true-optional 数组（absent 会默认 []，
-  // 破坏"缺省→默认 memos 项"语义）；形状校验由 registry 的 normalizeDescriptor 防御性兜底。
-  recallProviders: z.any(),
+  // RecallProviders 注册表（M3 A1）：多记忆源并行召回。
+  // 2026-10-01 行为变更：缺省 = **无 provider**（memos 已在本机/云端摘除，M2 的
+  // 「缺省自动造默认 memos 项指向 127.0.0.1:18801」兼容垫拆除）；absent 与显式 []
+  // 完全等价。要启用 memos 必须显式写描述符：
+  //   recallProviders: [{ id: 'memos', baseUrl: 'http://host:18801' }]
+  // 注：schemastery 3.18 无 true-optional 数组——absent 归一为 [] 正好就是新语义，
+  // 原来的 z.any() 透传（为保住旧「缺省→默认 memos 项」语义）随之收掉。
+  recallProviders: z.array(z.any()),
   // LLM 任务路由（M3 A2）：{task: {provider, model, fallback?, timeoutMs, maxTokens}}；
   // consolidation 任务缺省从 consolidationProvider/consolidationModel 映射（向后兼容）。
   llmTasks: z.any(),
@@ -425,14 +424,10 @@ export function apply(ctx, config = {}) {
   const minEvidence = config.consolidationMinEvidence ?? CONSOLIDATION_MIN_EVIDENCE
   const minTurns = config.consolidationMinTurns ?? CONSOLIDATION_MIN_TURNS
 
-  // M3 A1：Recall Provider 注册表（多记忆源；缺省用 memosBaseUrl/memosEnabled 构造默认
-  // memos 项，向后兼容，M2 行为不变）
+  // M3 A1：Recall Provider 注册表（多记忆源）。2026-10-01 起缺省 = 无 provider
+  // （不再从 memosBaseUrl/memosEnabled 造默认项）；启用哪些源完全由 recallProviders 决定。
   const registry = createProviderRegistry({
     recallProviders: config.recallProviders,
-    defaults: {
-      memosBaseUrl: config.memosBaseUrl,
-      memosEnabled: config.memosEnabled,
-    },
     logger: ctx.logger ?? console, // P0-2：降级留痕走宿主 logger
   })
 
@@ -648,7 +643,7 @@ export function apply(ctx, config = {}) {
       const profileCandidates = profileView ? profileToCandidates(profileView, scopeId) : []
 
       // —— Provider recall（M3 A1）：registry 并行召回，semantic 分来源（COMPOSER.md §4）——
-      // hasProvider = registry 有启用 provider（provider 自适应权重切换）；
+      // hasProvider = registry 有启用 provider（缺省无 provider → false，走无 provider 权重分支）；
       // recallAll 已 fail-open（[]），Provider 故障不阻断 turn，也不额外降级 hasProvider。
       const enabledProviders = registry.listRecallProviders()
       let hasProvider = enabledProviders.length > 0

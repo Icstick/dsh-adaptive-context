@@ -3,8 +3,11 @@
 // 多记忆源召回：注册表持有 N 个 recall provider 描述符，recallAll 并行召回，
 // 各自超时 + fail-open（单 provider 故障不阻断，返回其余结果）。
 //
-// 兼容旧配置（M2 行为不变）：未提供 recallProviders 时，自动用
-// defaults.memosBaseUrl / defaults.memosEnabled 构造默认 memos 项。
+// 缺省语义（2026-10-01 行为变更）：未提供 recallProviders → **无 provider**，
+// 此时 listRecallProviders() 返回 []、recallAll 返回 []，与显式写 [] 完全等价。
+// M2 时代的「缺省自动造默认 memos 项（127.0.0.1:18801）」兼容垫已拆除：memos
+// 在本机/云端已摘除，缺省指向一个不存在的后端没有意义。要启用 memos 必须显式配置：
+//   recallProviders: [{ id: 'memos', baseUrl: 'http://host:18801' }]（工厂仍在 memos.mjs）
 //
 // 描述符形状（kind 固定 'recall'）：
 //   { id, enabled, timeoutMs, weight, baseUrl? }
@@ -14,10 +17,10 @@
 //   - 只做召回编排，不做评分/排序（融合归 composer，M3 A3）
 //   - 候选统一打 sourceProvider = 描述符 id（多源归一）
 //   - 候选通过 recall-contract 校验（id/content/score/sourceProvider 齐全）
-//   - 全部 provider 禁用 → recallAll 返回 []（hasProvider=false 由调用方从
-//     listRecallProviders() 判定，走 M2 无 provider 行为）
+//   - 无 provider / 全部 provider 禁用 → recallAll 返回 []（hasProvider=false 由调用方从
+//     listRecallProviders() 判定，走无 provider 权重行为）
 
-import { createMemosProvider, MEMOS_DEFAULT_BASE_URL, MEMOS_DEFAULT_TIMEOUT_MS } from './memos.mjs'
+import { createMemosProvider, MEMOS_DEFAULT_TIMEOUT_MS } from './memos.mjs'
 import { isValidRecallCandidate } from './recall-contract.mjs'
 
 /** 内置 provider 工厂（id → factory）。M3 MVP 只有 memos；v0.2 扩展 Reflect/Profile 等。 */
@@ -32,9 +35,8 @@ const DEFAULT_FACTORIES = Object.freeze({
 /**
  * 创建 Recall Provider 注册表。
  * @param {object} [opts]
- * @param {object[]} [opts.recallProviders] - 描述符数组（缺省/undefined → 用 defaults 构造默认 memos 项；
- *   显式 [] → 无 provider）
- * @param {object} [opts.defaults] - 旧配置兼容 { memosBaseUrl, memosEnabled, timeoutMs }
+ * @param {object[]} [opts.recallProviders] - 描述符数组（缺省/undefined 与显式 [] 等价：无 provider）
+ * @param {object} [opts.defaults] - 跨 provider 缺省值（当前仅 timeoutMs）
  * @param {object} [opts.factories] - 额外 provider 工厂 { id: (desc) => provider }（测试注入用）
  * @returns {{
  *   listRecallProviders: () => object[],
@@ -92,22 +94,9 @@ export function createProviderRegistry({ recallProviders, defaults = {}, factori
     }
   }
 
-  /** 旧配置兼容：memosBaseUrl/memosEnabled 缺失时自动构造默认 memos 项（M2 行为不变） */
-  function defaultMemosDescriptor() {
-    return normalizeDescriptor({
-      id: 'memos',
-      enabled: defaults.memosEnabled ?? true,
-      timeoutMs: defaults.memosTimeoutMs ?? MEMOS_DEFAULT_TIMEOUT_MS,
-      weight: 1,
-      baseUrl: defaults.memosBaseUrl ?? MEMOS_DEFAULT_BASE_URL,
-    })
-  }
-
-  /** 最终描述符列表：recallProviders 缺省 → 默认 memos 项；显式数组 → 原样（空数组 = 无 provider） */
+  /** 最终描述符列表：recallProviders 缺省/非数组 → 无 provider；显式数组 → 原样（空数组同样无 provider） */
   function resolveDescriptors() {
-    const list = Array.isArray(recallProviders) && recallProviders !== undefined
-      ? recallProviders
-      : [defaultMemosDescriptor()]
+    const list = Array.isArray(recallProviders) ? recallProviders : []
     return list
       .map(normalizeDescriptor)
       .filter((d) => d !== null)

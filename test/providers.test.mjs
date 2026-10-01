@@ -155,43 +155,53 @@ test('compose 集成：hasProvider=true 时 MemOS providerScore 参与排序（T
 
 // ===================== M3 A1：Provider Registry（多源召回） =====================
 
-test('registry 缺省：无 recallProviders → 自动构造默认 memos 项（向后兼容）', async (t) => {
+test('registry 缺省：无 recallProviders → 无 provider（2026-10-01 行为变更）', async () => {
+  // 旧行为（M2 兼容垫）：缺省自动造 memos 项指向 127.0.0.1:18801。
+  // 新行为：缺省 = 没有 provider，与显式写 [] 完全等价。
+  const registry = createProviderRegistry({})
+  assert.deepEqual(registry.listRecallProviders(), [])
+  assert.equal(registry.hasHealthyProvider(), false, '无 provider → hasProvider 判定为 false')
+  assert.deepEqual(await registry.recallAll({ text: 'x', limit: 5 }), [])
+})
+
+test('registry 缺省 = 显式 []：两条路径产出完全一致', async () => {
+  const absent = createProviderRegistry({})
+  const empty = createProviderRegistry({ recallProviders: [] })
+  assert.deepEqual(absent.listRecallProviders(), empty.listRecallProviders())
+  assert.deepEqual(await absent.recallAll({ text: 'x' }), await empty.recallAll({ text: 'x' }))
+})
+
+test('registry 显式配置 memos 描述符 → 仍可用（内置工厂保留）', async (t) => {
+  // memos.mjs 未删除：显式 recallProviders: [{id:'memos', baseUrl}] 仍走内置工厂实际召回
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => ({
     ok: true,
     json: async () => ({
-      hits: [{ tier: 1, refId: 't-1', refKind: 'trace', score: 0.7, snippet: '默认 memos 项召回' }],
+      hits: [{ tier: 1, refId: 't-1', refKind: 'trace', score: 0.7, snippet: '显式 memos 项召回' }],
     }),
   })
   t.after(() => { globalThis.fetch = originalFetch })
 
   const registry = createProviderRegistry({
-    defaults: { memosBaseUrl: 'http://127.0.0.1:18801', memosEnabled: true },
+    recallProviders: [{ id: 'memos', enabled: true, baseUrl: 'http://127.0.0.1:18801' }],
   })
   const providers = registry.listRecallProviders()
   assert.equal(providers.length, 1)
   assert.equal(providers[0].id, 'memos')
   assert.equal(providers[0].kind, 'recall')
-  assert.equal(providers[0].enabled, true)
   assert.equal(providers[0].weight, 1) // 缺省权重 1.0
   assert.ok(providers[0].timeoutMs > 0)
 
-  const hits = await registry.recallAll({ text: '默认', limit: 5 })
+  const hits = await registry.recallAll({ text: '显式', limit: 5 })
   assert.equal(hits.length, 1)
   assert.equal(hits[0].sourceProvider, 'memos')
-  assert.equal(hits[0].content, '默认 memos 项召回')
+  assert.equal(hits[0].content, '显式 memos 项召回')
 })
 
-test('registry 缺省但 memosEnabled=false → 无启用 provider，recallAll 返回 []', async () => {
+test('registry 显式配 memos 但 enabled:false → 无启用 provider', async () => {
   const registry = createProviderRegistry({
-    defaults: { memosBaseUrl: 'http://127.0.0.1:18801', memosEnabled: false },
+    recallProviders: [{ id: 'memos', enabled: false, baseUrl: 'http://127.0.0.1:18801' }],
   })
-  assert.equal(registry.listRecallProviders().length, 0)
-  assert.deepEqual(await registry.recallAll({ text: 'x' }), [])
-})
-
-test('registry 显式 [] → 不启用任何 provider（区别于缺省）', async () => {
-  const registry = createProviderRegistry({ recallProviders: [], defaults: { memosEnabled: true } })
   assert.equal(registry.listRecallProviders().length, 0)
   assert.deepEqual(await registry.recallAll({ text: 'x' }), [])
 })

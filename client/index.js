@@ -45,8 +45,6 @@ const FIELDS = [
     options: ['non-instructional', 'all', 'none'],
   },
   { name: 'subagentDowngrade', label: '子代理会话降权', hint: '父 agent 派发的 prompt 不冒充用户指令', type: 'toggle' },
-  { name: 'memosEnabled', label: 'MemOS 记忆源', type: 'toggle' },
-  { name: 'memosBaseUrl', label: 'MemOS 地址', type: 'text' },
   { name: 'consolidationProvider', label: '沉淀模型服务商', type: 'text' },
   { name: 'consolidationModel', label: '沉淀模型', type: 'text' },
   { name: 'autoPromote', label: '自动提升', hint: '风格候选策略达标后自动晋升', type: 'toggle' },

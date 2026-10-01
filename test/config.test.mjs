@@ -19,8 +19,9 @@ test('plugin config validates defaults through Standard Schema', async () => {
       fusion: 'weighted', // 2026-09-09：默认加权求和；rrf 为可选融合策略
       subagentDowngrade: true,
       debug: false,
-      memosBaseUrl: 'http://127.0.0.1:18801',
-      memosEnabled: true,
+      // 2026-10-01：memosBaseUrl/memosEnabled 退场——缺省不再造默认 memos 项
+      // （recallProviders 缺省 = 无 provider），字段与默认值一并删除。
+      recallProviders: [], // 缺省归一为 []（schemastery 数组语义），等于「无 provider」
       startupRebuild: true,
       autoPromote: false,
       observationInjection: false, // 2026-09-02：observation 注入已接线但默认冻结
@@ -57,10 +58,19 @@ test('plugin config passes through recallProviders and llmTasks (M3 A1/A2)', asy
   assert.deepEqual(result.value.llmTasks, input.llmTasks)
 })
 
-test('plugin config: absent recallProviders/llmTasks stay absent (backward compat defaults)', async () => {
+test('plugin config: absent recallProviders → []（= 无 provider，2026-10-01 变更）', async () => {
   const result = await Config['~standard'].validate({})
-  assert.equal('recallProviders' in result.value, false)
-  assert.equal('llmTasks' in result.value, false)
+  // 旧行为：recallProviders 用 z.any() 透传，缺省保持 absent，由 registry 造默认 memos 项。
+  // 新行为：缺省归一为 []，registry 侧即「无 provider」——absent 与显式 [] 等价。
+  assert.deepEqual(unwrapVolatileConfig(result.value).recallProviders, [])
+  assert.equal('llmTasks' in result.value, false) // llmTasks 仍是可选透传，语义未变
+})
+
+test('plugin config: explicit [] 与缺省等价（无 provider）', async () => {
+  const absent = unwrapVolatileConfig((await Config['~standard'].validate({})).value)
+  const empty = unwrapVolatileConfig((await Config['~standard'].validate({ recallProviders: [] })).value)
+  assert.deepEqual(absent.recallProviders, empty.recallProviders)
+  assert.deepEqual(absent.recallProviders, [])
 })
 test('mergeSettingsIntoConfig：settings 文档覆盖 Config（仅提供已配置字段）', async () => {
   const { mergeSettingsIntoConfig } = await import('../src/index.mjs')

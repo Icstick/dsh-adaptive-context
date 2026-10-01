@@ -161,8 +161,9 @@ pnpm install
   由 `node scripts/build-client.mjs` 生成）注册设置卡片；保存写入 settings.yaml
 - 生效语义：**保存后重启生效**（apply 时 settings 值覆盖 cordis Config，未配置字段回退 Config/默认值）
 - 字段：ledgerDir / hotTokens / observationInjection / observationAuthorities / recallLimit /
-  crossSessionPolicy / subagentDowngrade / memosEnabled / memosBaseUrl / consolidationProvider /
+  crossSessionPolicy / subagentDowngrade / consolidationProvider /
   consolidationModel / autoPromote / debug
+  （memosEnabled / memosBaseUrl 已于 2026-10-01 退场，见下方配置表注）
   （targetDomain 已弃用：卡片保留仅兼容展示，不再影响注入）
 - client 依赖：react（DSH 预加载）+ @deepseek-ai/dsh-client-ui-slots +
   @deepseek-ai/dsh-client-ui-settings（client module table 提供，无需安装到项目依赖）
@@ -179,9 +180,7 @@ pnpm install
 | `recallLimit` | number | 20 | 每个记忆源的召回候选上限 |
 | `targetDomain` | enum | work | **DEPRECATED（2026-09-07）**：读侧资格矩阵已按候选自身 claimDomain 自然分组，本键不再影响注入；保留键位仅为兼容存量配置/设置页 |
 | `debug` | boolean | false | 调试日志 |
-| `memosBaseUrl` | string | http://127.0.0.1:18801 | MemOS 后端地址（作为记忆源） |
-| `memosEnabled` | boolean | true | 启用默认的 MemOS 记忆源 |
-| `recallProviders` | array | 由 memosBaseUrl/memosEnabled 推出 | 记忆源注册表：`[{id, enabled, timeoutMs, weight, baseUrl?}]`；显式 `[]` = 一个源都不开 |
+| `recallProviders` | array | `[]`（无 provider） | 记忆源注册表：`[{id, enabled, timeoutMs, weight, baseUrl?}]`。**2026-10-01 行为变更**：缺省 = 无 provider（缺省与显式 `[]` 完全等价）。M2 的兼容垫「缺省自动造默认 memos 项指向 `127.0.0.1:18801`」已拆除——memos 已在本机/云端摘除。要启用 memos 仍可显式配置：`recallProviders: [{id: 'memos', baseUrl: 'http://host:18801'}]`（适配器保留在 `src/providers/memos.mjs`）；`memosBaseUrl` / `memosEnabled` 两个平铺键随之退场（存量配置里的这两个键被忽略，不再产生任何 provider） |
 | `llmTasks` | object | consolidation 由 consolidationProvider/Model 推出 | LLM 任务路由：`{任务名: {provider, model, fallback?: [{provider, model}], timeoutMs, maxTokens}}` |
 | `consolidationMinEvidence` | number | 10 | 节流：未消化的证据攒到这么多就触发沉淀 |
 | `consolidationMinTurns` | number | 5 | 节流：距上次沉淀超过这么多轮就触发 |
