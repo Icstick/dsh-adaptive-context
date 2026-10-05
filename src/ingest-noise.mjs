@@ -11,7 +11,11 @@
 //   2. **模板表冻结在这里**：加/改模板要显式改本文件并 bump INGEST_NOISE_VERSION，
 //      不要在调用点临时拼正则 —— 否则判据会随调用点漂移，且无法审计「哪个版本拦了什么」。
 
-export const INGEST_NOISE_VERSION = 1
+// 2026-10-04 bump 2：新增「工具执行回执」一类（审计发现 memory 段被它占满）。
+//   实测：memory 段候选 99.7% 是 external_tool 转写，396 条抢 290 token，入选的全是
+//   done / ok / written 11663 / report bytes: 13328 / still stale bytes 13326 这类**执行回执**。
+//   它们没有信息量，却因为 tokens 小（效率高）把配额占满 —— 有内容的工具输出反而进不来。
+export const INGEST_NOISE_VERSION = 2
 
 /**
  * 冻结模板表。
@@ -41,6 +45,43 @@ export const MACHINE_TEMPLATES = Object.freeze([
     kind: 'prefix',
     value: '<system-reminder',
     note: '系统注入块；AGENTS.md 铁律 7 本就要求解析会话事件时跳过它',
+  }),
+  // ── 工具执行回执（2026-10-04，version 2）──────────────────────────────
+  // ⚠️ 这一类**必须整条锚定**（^…$）—— 它们都是极端短的短语，做前缀或子串会误伤
+  //    正常正文（比如一句话里提到「done」）。纪律见本文件头部第 1 条。
+  Object.freeze({
+    id: 'tool-receipt-bare',
+    kind: 'regex',
+    value: /^(?:done|ok|success|finished|empty|no output)\.?$/i,
+    note: '工具/脚本的裸回执；实测样例 done / ok',
+  }),
+  Object.freeze({
+    id: 'tool-receipt-written',
+    kind: 'regex',
+    // 两种形态都实测见过：
+    //   `written 11663`（无文件名）
+    //   `[d2-plugin-sources.md written] size=5543`（written 在方括号里）
+    // ⇒ 第一条的文件名部分必须可选，第二条单独写。**整条锚定**，不做子串。
+    value: /^(?:\[?[\w./\\-]{1,120}\]?\s+)?(?:written|created|updated|saved)\s+\d+\s*(?:bytes?|B)?\.?$/i,
+    note: '写文件回执（无文件名形态）；实测样例「written 11663」',
+  }),
+  Object.freeze({
+    id: 'tool-receipt-written-bracketed',
+    kind: 'regex',
+    value: /^\[[\w./\\-]{1,120}\s+written\]\s*(?:size\s*[:=]\s*\d+)?\.?$/i,
+    note: '写文件回执（方括号形态）；实测样例「[d2-plugin-sources.md written] size=5543」',
+  }),
+  Object.freeze({
+    id: 'tool-receipt-counts',
+    kind: 'regex',
+    value: /^(?:report\s+bytes|bytes|size|lines?|rows?)\s*[:=]?\s*\d+\s*(?:bytes?|B|行|条)?\.?$/i,
+    note: '计数回执；实测样例「report bytes: 13328」',
+  }),
+  Object.freeze({
+    id: 'tool-receipt-stale',
+    kind: 'regex',
+    value: /^(?:still\s+stale|unchanged|up[\s-]?to[\s-]?date|no\s+changes?)\b[\s\S]{0,40}$/i,
+    note: '状态回执；实测样例「still stale\nbytes 13326」',
   }),
 ])
 

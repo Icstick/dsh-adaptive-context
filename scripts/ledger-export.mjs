@@ -10,6 +10,16 @@
 //   **默认只导 observation（L1）** —— L0 原始证据不出机（含真实原话）。
 //   要导别的层必须显式 --stream，且自己承担隐私与体积后果。
 //
+// ⚠️ 这句话的作用域（2026-10-04 补注，对应审计 P0-B）：
+//   它管的是**本脚本的导出行为**，不是全局承诺。写下它的时候没人注意备份链 ——
+//   而备份链（.tooling/scripts/dsh-cos-backup.ps1 的 memoryplane 任务）走的是
+//   **整库 VACUUM INTO**，一度把 L0 一起送上 COS（每周一份、云上留 12 份）。
+//   两条规则各自自洽，冲突只在措辞 —— 这是口径不一致，不是 bug。
+//
+//   2026-10-04 起备份链已在 VACUUM 之后、算 SHA256 之前跑
+//   `.tooling/scripts/strip-l0.mjs` 剥掉 L0（妹妹拍板选 B），与本脚本的边界对齐。
+//   **改这里或改那里，都请看对方的注释** —— 判据分叉比没有判据更坏。
+//
 // 只读性说明：
 //   本脚本用 openEvidenceLedger 打开（会跑 PRAGMA journal_mode=WAL + schema 迁移，幂等）。
 //   **严格要求零写入的场景请用 ledger-audit.mjs**（那是纯 readOnly 连接）。

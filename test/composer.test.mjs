@@ -194,7 +194,11 @@ const pcand = (over = {}) => ({
   ...over,
 })
 
-const A3_QUERY = { query: '工具链选择', scopeId: 'user-global', targetDomain: 'work', maxTokens: 900 }
+// ⚠️ skipExternalTool:false —— A3 这一组测的是 **provider 语义路由**（归一化 / 权重 / 跨源合并），
+//    与被注入条目的**来源**无关。而 pcand() 这个脚手架把 sourceClass 写成了 'external_tool'
+//    （生产里它代表「记忆提供方的返回」，不是工具输出；本机生产的 recallProviders 是空的）。
+//    2026-10-04 加了「工具输出不进注入面」那道过滤后，这组测试会被误伤 —— 故在此显式关掉。
+const A3_QUERY = { query: '工具链选择', scopeId: 'user-global', targetDomain: 'work', maxTokens: 900, skipExternalTool: false }
 
 test('A3 多源同 contentHash：跨源候选合并为 1 条，保留 utility 最高', () => {
   const alpha = pcand({ id: 'alpha:1', content: '相同记忆片段', providerScore: 0.9 })
@@ -446,6 +450,51 @@ test('B8：compose 返回 admittedIds，与 items 一致且进入 telemetry', ()
   assert.ok(r.items.length > 0)
   assert.deepEqual(r.admittedIds, r.items.map((c) => c.id))
   assert.deepEqual(r.telemetry.admittedIds, r.admittedIds)
+})
+
+// ── memory 段被工具执行回执占满（2026-10-04 审计发现）─────────
+// 实测（evidence/lead-verify/measure-drop-distribution.mjs + check-source-mix.mjs）：
+//   · memory 段候选 **99.7% 是 external_tool 转写**（真人来源走 Profile 通道，被 isProfileDomain 滤掉）
+//   · 396 条候选抢 290 token 配额 → 只进 10 条，全是 <60 字符的碎片
+//   · 碎片真身：done ｜ ok ｜ written 11663 ｜ report bytes: 13328 ｜ still stale bytes 13326
+// **它们不是「短条目」，是「工具的执行回执」** —— 没有信息量，却因为 tokens 小而效率高。
+// ⚠️ 第一版这个测试测的是「长度」（挡住太短的）—— **方向错了**：
+//    候选里只有 4 条 <8 token，按长度挡几乎挡不到东西（choose-threshold.mjs）。
+//    判据必须是「有没有信息」，不是「有多长」。
+// ⚠️ 它现在会失败 —— 那正是「先红」。修法：往 src/ingest-noise.mjs 的冻结模板表加「工具回执」一类，
+//    并在读侧（composer 候选预处理）复用同一个判据覆盖存量。
+test('工具执行回执不该进 memory 段，有内容的输出应当保留（2026-10-04）', () => {
+  const r = compose([
+    ev({ id: 'receipt-done', content: 'done', claimDomain: 'external_fact' }),
+    ev({ id: 'receipt-ok', content: 'ok', claimDomain: 'external_fact' }),
+    ev({ id: 'receipt-written', content: 'written 11663', claimDomain: 'external_fact' }),
+    ev({ id: 'receipt-bytes', content: 'report bytes: 13328', claimDomain: 'external_fact' }),
+    ev({ id: 'real-output', content: '这次运行以 EACCES 失败：目标目录被另一个进程占用，需要先释放句柄再重试。', claimDomain: 'external_fact' }),
+  ], { query: 'rollback', scopeId: 'user-global' })
+  const ids = r.items.map((c) => c.id)
+  for (const bad of ['receipt-done', 'receipt-ok', 'receipt-written', 'receipt-bytes']) {
+    assert.ok(!ids.includes(bad), bad + ' 是工具执行回执，不该进注入 —— 实际注入: ' + (ids.join(', ') || '(空)'))
+  }
+  assert.ok(ids.includes('real-output'), '有内容的输出应当保留 —— 实际注入: ' + (ids.join(', ') || '(空)'))
+})
+
+// ── 工具输出不进记忆段（2026-10-04，妹妹拍板）──────────────────
+// 实测（evidence/lead-verify/check-source-mix.mjs + show-selected.mjs）：
+//   · memory 段候选 **99.7% 是 external_tool 转写**（394/395）
+//   · 全库 external_tool 13,598 条 vs 真人来源 1,023 条 = **13.3 : 1**
+//   · 过滤掉裸回执之后，入选的仍是「工具调用的返回值」：
+//       {"kind":"background","jobId":"pwsh-38"} ｜ [SELFDEV-LOG 56 written] SELFDEV-LOG=1605 行
+//   ⇒ **整个记忆段里装的不是「记忆」，是工具的过程记录。**
+// 判据：external_tool 来源的候选一律不进注入；其他来源照旧。
+// ⚠️ 它现在会失败 —— 那正是「先红」。
+test('工具输出（external_tool）不进记忆段，其他来源不受影响（2026-10-04）', () => {
+  const r = compose([
+    ev({ id: 'tool-out', content: '=== job pwsh-144 status: running ===', sourceClass: 'external_tool', claimDomain: 'external_fact' }),
+    ev({ id: 'agent-note', content: '这条结论来自上一轮的实测：折叠净省 57.6%。', sourceClass: 'agent_authored', claimDomain: 'experience' }),
+  ], { query: 'rollback', scopeId: 'user-global' })
+  const ids = r.items.map((c) => c.id)
+  assert.ok(!ids.includes('tool-out'), 'external_tool 是工具过程记录，不该进记忆段 —— 实际注入: ' + (ids.join(', ') || '(空)'))
+  assert.ok(ids.includes('agent-note'), '非工具来源应当照旧注入 —— 实际注入: ' + (ids.join(', ') || '(空)'))
 })
 
 

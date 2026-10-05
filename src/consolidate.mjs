@@ -26,6 +26,7 @@ import {
   ACK_ONLY_MAX_CHARS,
   MAX_OBSERVATION_SUBJECT_CHARS,
   MAX_OBSERVATION_TEXT_CHARS,
+  CONSOLIDATION_SKIP_EXTERNAL_TOOL,
 } from './constants.mjs'
 import { PENDING_PROMOTION } from './expression.mjs'
 import { isActionFlowObservation } from './governance.mjs'
@@ -49,6 +50,28 @@ export function isConsolidationSkippable(ev, skipAgentExperience = CONSOLIDATION
   if (machineTemplateOf(ev?.content)) return true
   if (!skipAgentExperience) return false
   return ev?.sourceClass === 'agent_authored' && ev?.claimDomain === 'experience'
+}
+
+// ===================== 工具输出过滤（2026-10-04 审计 P0-1） =====================
+
+/**
+ * 该条证据是否是**工具输出转写**（应跳过蒸馏）。
+ *
+ * sourceClass='external_tool' = 命令输出 / 文件内容 / 检索结果这类**转写**，
+ * 不是「关于用户的事实」。它是队列积压的主体：7,773 条里 7,156 条（92%）。
+ * 与上面那道（agent 自产 experience）同构：**仍在账本内**（append-only 不删），
+ * 只是不参与蒸馏。
+ *
+ * **默认不过滤**（CONSOLIDATION_SKIP_EXTERNAL_TOOL = false）——先 shadow：
+ * 这道比前两道狠得多，要能先看「打开后会怎样」再决定。
+ *
+ * @param {object} ev - evidence 行（camelCase）
+ * @param {boolean} [skipExternalTool] - false = 不过滤（默认）
+ * @returns {boolean}
+ */
+export function isExternalToolSkippable(ev, skipExternalTool = CONSOLIDATION_SKIP_EXTERNAL_TOOL) {
+  if (!skipExternalTool) return false
+  return ev?.sourceClass === 'external_tool'
 }
 
 // ===================== 纯应答过滤（2026-09-22） =====================
@@ -382,6 +405,8 @@ export function createConsolidator(opts = {}) {
     skipAgentExperience = CONSOLIDATION_SKIP_AGENT_EXPERIENCE,
     // 2026-09-22：纯应答短消息（「继续」「重启好了」）不进队列
     skipAckOnly = CONSOLIDATION_SKIP_ACK_ONLY,
+    // 2026-10-04 审计 P0-1：工具输出转写（external_tool）不进队列。**默认 false = 不过滤**（先 shadow）
+    skipExternalTool = CONSOLIDATION_SKIP_EXTERNAL_TOOL,
     logger = console,
     // M3 B3：guarded auto promotion 依赖（index.mjs 装配；缺省 null = M2 行为）
     candidateStore = null,
@@ -410,7 +435,8 @@ export function createConsolidator(opts = {}) {
 
   /** 未消化 = active 且 observedAt > 上次 consolidation 水位（按 observedAt 升序，保证分批可续）。
    *  源头过滤两道：P0（2026-09-09）agent 自产 experience 动作流水；
-   *  纯应答（2026-09-22）零信息的续跑/确认短句。都在进入队列前剔除。 */
+   *  纯应答（2026-09-22）零信息的续跑/确认短句。
+   *  工具输出转写（2026-10-04）external_tool —— **默认关**，见 constants 里的 shadow 说明。 */
   function undigestedEvidence() {
     const watermark = readMeta(CONSOLIDATION_META_WATERMARK_TS)
     const active = typeof ledger.listActive === 'function'
@@ -422,6 +448,7 @@ export function createConsolidator(opts = {}) {
     return pendingRows
       .filter((ev) => !isConsolidationSkippable(ev, skipAgentExperience))
       .filter((ev) => !isAckOnlySkippable(ev, skipAckOnly))
+      .filter((ev) => !isExternalToolSkippable(ev, skipExternalTool))
       .sort((a, b) => String(a.observedAt ?? '').localeCompare(String(b.observedAt ?? '')))
   }
 

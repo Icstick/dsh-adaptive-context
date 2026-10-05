@@ -21,6 +21,9 @@
 
 import { hashHex } from './constants.mjs'
 import { readGuard } from './governance.mjs'
+// 2026-10-04：读侧复用摄入侧的机器模板判据（覆盖「已经躺在账本里」的存量条目）
+import { machineTemplateOf } from './ingest-noise.mjs'
+import { INJECTION_SKIP_EXTERNAL_TOOL } from './constants.mjs'
 import {
   packBySection, estimateTokens, truncateToTokens, LINE_LABEL_TOKENS, SHORT_LABEL_TOKENS,
   MVP_SECTION_QUOTA, MVP_TOTAL_BUDGET, ComposeTelemetry,
@@ -385,14 +388,36 @@ export function compose(rawCandidates, opts = {}) {
     noEcho.push(...ranked)
   }
 
+  // —— 机器模板过滤（2026-10-04，读侧）────────────────────────────────
+  // 为什么在读侧也拦一道：src/ingest-noise.mjs 的拦截在**摄入侧**，只管新条目；
+  // 而账本里已经躺着一批存量（实测 memory 段候选 **99.7% 是 external_tool 转写**，
+  // 其中大量是 `done` / `ok` / `written 11663` / `report bytes: 13328` 这类**执行回执**）。
+  // 它们没有信息量，却因为 tokens 小（效率高）把 290 token 配额占满，有内容的输出反而进不来。
+  // 判据复用同一个冻结表，**不在这里临时拼正则**（纪律见 ingest-noise.mjs 头部）。
+  // 同段再加一道：**工具输出转写不进注入面**（2026-10-04，妹妹拍板）。
+  // 与上面那条的区别：机器模板挡的是「形态明确的裸回执」，这条挡的是**整个来源**
+  // （external_tool 转写 —— 实测占 memory 段候选的 99.7%）。开关在 constants.mjs。
+  // opts.skipExternalTool 可覆盖常量（与同族的 CONSOLIDATION_SKIP_EXTERNAL_TOOL 一致，见 constants.mjs）
+  const skipTool = opts.skipExternalTool === undefined ? INJECTION_SKIP_EXTERNAL_TOOL : !!opts.skipExternalTool
+  const denoised = []
+  for (const cand of noEcho) {
+    if (skipTool && cand.sourceClass === 'external_tool') {
+      telemetry.dropped.push({ id: cand.id, reason: 'external-tool-not-injectable' })
+      continue
+    }
+    const hit = machineTemplateOf(String(cand.content ?? ''))
+    if (hit) telemetry.dropped.push({ id: cand.id, reason: 'machine-template:' + hit.id })
+    else denoised.push(cand)
+  }
+
   // —— C3 滞回（2026-09-12，用户拍板）：上一步已在注入集的候选获得粘性加成 ——
   // 抑制相邻 step 注入集抖动（B8 turnover 观测的配套抑制手段）。相对加成 ×(1+h)，
   // 不改变 utility 量纲；h=0 关闭。h=0.2 → 挤掉一个在位条目需要多 20% 的 utility。
   const hysteresis = Number(opts.hysteresis ?? 0)
   const prevIdSet = hysteresis > 0 && Array.isArray(opts.previousIds) ? new Set(opts.previousIds) : null
   const sticky = prevIdSet
-    ? noEcho.map((c) => (prevIdSet.has(c.id) ? { ...c, utility: c.utility * (1 + hysteresis), sticky: true } : c))
-    : noEcho
+    ? denoised.map((c) => (prevIdSet.has(c.id) ? { ...c, utility: c.utility * (1 + hysteresis), sticky: true } : c))
+    : denoised
 
   // —— Dedup：先按 id（跨 Provider 重复），再按 contentHash（内容重复，T2）——
   // contentHash = cand.contentHash ?? hashHex(cand.content)；同 hash 仅保留 utility

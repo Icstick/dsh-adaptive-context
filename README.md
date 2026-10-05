@@ -191,7 +191,7 @@ pnpm install
 | `consolidationTimeoutMs` | number | 30000 | 提炼调用超时 |
 | `autoPromote` | boolean | false | 风格候选策略达标后自动晋升（默认关，走人工审批门） |
 | `viewsDir` | string | ledgerDir/views | 物化视图目录 |
-| `rulesDir` | string | ~/.dsh/rules | 规则视图目录（T4 M4.1：反馈通道规则的人类可读视图，按域分文件、可从 ledger 重建；跨 workspace/profile 全局） |
+| `rulesDir` | string | ~/.dsh/rules | 规则视图目录（T4 M4.1：反馈通道规则的人类可读视图，按域分文件、可从 ledger 重建；跨 workspace/profile 全局）。**2026-10-02 起**：本次域集为空时跳过陈旧清理（一个都不删，只 warn）——缺省路径不会再被一次空域集刷新扫空 |
 | `policyConfig` | object | — | promotion 策略参数覆盖（floors 只允许更严：min_events 最低 2、min_strong 最低 1、证据窗口最长 30 天） |
 | `startupRebuild` | boolean | true | 启动时校验视图 checksum，失配自动重建 |
 | `crossSessionPolicy` | enum | non-instructional | 跨会话注入闸门（2026-08-30）：`non-instructional`=跨会话只注入非指令性内容（agent_authored 总结/external_tool），user_input/user_correction 跨会话不注入；`all`=跨会话全类别注入（utility×0.3 惩罚 + session 来源标记）；`none`=不注入任何跨会话内容。本会话内容始终全类别注入 |
@@ -341,6 +341,7 @@ recentState / interactionPatterns / inferredTraits   ← MVP 恒空（CONTRACTS 
 - 账本 schema 版本在 `acp_meta.schema_version`；升级是**自动**的（打开时建表并写版本号），无需手工迁移脚本
 - 物化视图在 `ledgerDir/views/` 下，可随时重建（带校验和）
 - 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）；规则经外部脚本写入后视图不会自动刷新，用 `/acp rule rebuild` 手动重建
+- **陈旧清理的空域集守卫（2026-10-02 事故）**：重建时会把「目录里带 `kind: acp-rules` 头、却不在本次域集内」的 `.md` 当陈旧域删掉（用户自己的 `.md` 从不碰）；但**域集为空时整条清理跳过**，一个都不删，只在日志打一条 warn（写明目标目录与保留的 md 数）。缘由：当天一次域集为空的装配（`apply()` 里 eager 重建，未传 `rulesDir` → 回落 `~/.dsh/rules`，且那一刻账本一条 active 规则都没读到）把该目录下的 `security.md` / `workflow.md` 当真陈旧域删了。取舍：**宁可留下一个失效域的视图**（可从账本重建、可手删，下一次带非空域集的刷新会正常把它收走），也不冒删光真规则的风险
 - **备份/迁移**：导出（JSONL）→ 新环境导入，按内容哈希幂等合并
 - **数据是你的**：卸载插件不会删数据；装回来即恢复
 

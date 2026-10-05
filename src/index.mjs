@@ -346,11 +346,15 @@ export function apply(ctx, config = {}) {
 
   // --- T4 M4.1b：rules/ 视图重建闭包（views are rebuildable）---
   // 启动全量重建 + /acp rule accept 后刷新共用；失败只 warn 不阻断插件。
+  // 注意（2026-10-02 15:37 事故）：这个闭包在 apply() 里是 eager 调用的，装配时账本可能
+  // 一条 active 规则都没有。此时域集为空——writeRulesDir 内部的「空域集守卫」会跳过陈旧
+  // 清理（一个都不删）并 warn，所以缺 rulesDir 覆盖不会再扫掉 ~/.dsh/rules 下的真视图。
+  // 守卫只在 rules.mjs 一处（那是真正 rmSync 的地方），此处只负责把 logger 递下去。
   const rulesDir = config.rulesDir ?? path.join(resolveDshHome(), 'rules')
   function refreshRulesView() {
     try {
       const activeRules = ledger.ruleStore.queryRules({ state: 'active', limit: 500 }).items
-      const rulesRes = writeRulesDir(activeRules, { dir: rulesDir })
+      const rulesRes = writeRulesDir(activeRules, { dir: rulesDir, logger: ctx.logger })
       ctx.logger?.debug?.('[acp] rules view rebuilt: files=' + rulesRes.files.length)
       return true
     } catch (err) {
@@ -709,6 +713,10 @@ export function apply(ctx, config = {}) {
         observationHalfLifeDays: config.observationHalfLifeDays ?? 30,
         hysteresis: config.injectionHysteresis ?? 0.2,
         previousIds: lastInjectedBySession.get(sessionId) ?? [],
+        // 2026-10-04：装配处可覆盖「工具输出不进注入面」（默认见 constants.mjs）。
+        // 测试 prestep-contract 用它来测 pre-step 契约本身（那两条用例的候选只能由
+        // tool/result 摄入，而 tool/result → external_tool —— 不覆盖就永远进不去）。
+        skipExternalTool: config.skipExternalTool,
       })
 
       // —— T6 style 审批门（2026-08-27 架构修正）——
