@@ -68,10 +68,65 @@ DSH 会话事件
 
 注入的召回消息以 `source.kind: plugin:dsh-adaptive-context` 标记生产者，并保留 `form: recall` 供会话审计。
 
+## DSH 兼容声明与验收范围
+
+`package.json` 的 `dsh.compatibility` 显式声明 **DSH 0.2.0-rc.1**；Node.js 范围沿用
+`engines.node: ^22.19.0 || >=24.0.0`（运行依赖 Node.js 内置 `node:sqlite`）。
+Web 配置界面还依赖宿主提供的 React、UI slots/settings 服务与对应客户端模块；
+各 `@deepseek-ai/*` 子包的 peer 范围是依赖约束，不替代 DSH 主版本兼容证据。
+
+| DSH 完整版本 | 声明 | 依据与限制 |
+|---|---|---|
+| `0.2.0-rc.1` | `compatible` | 2026-10-13 作者报告“0.2.0-rc1可以，后续不清楚”；属于作者可用性声明，未提供测试 Commit、系统和完整操作日志 |
+| `0.2.0-rc.2` | `unknown` | 尚无本仓对应的完整版本验收记录 |
+| `0.2.1-alpha.1` | `unknown` | 尚无本仓对应的完整版本验收记录 |
+| `0.2.1-alpha.2` | `unknown` | 尚无本仓对应的完整版本验收记录 |
+
+其他版本未声明兼容；精确范围 `0.2.0-rc.1` 不自动覆盖后续 rc、alpha 或稳定版。
+`profiles: ["web"]` 表示客户端目标，不表示其他 Profile 不可运行，也不表示已完成 Web Profile 验收。
+当前 `dshOperations` 的 install/start/uninstall/rollback 都保持 `unknown`。
+作者报告、源码/单元测试、一次性 Profile 操作验收和独立安全审查分别记录；
+单元测试通过不能把操作矩阵改为 `passed`。
+
+[兼容来源与一次性 Profile 验收清单](docs/STORE-COMPATIBILITY.md) 记录证据边界、验证步骤和回滚要求。
+此声明不会消除文件、网络或环境变量访问信号，也不保证商城自动批准。
+
+## 权限、外部服务与失败边界
+
+ACP 使用 **DSH 进程权限** 运行，没有独立文件或网络沙箱。配置路径与服务地址由用户指定，
+代码没有把它们限制在插件目录内；结合会话内容、持久账本、规则写入与可选外部调用，
+按保守口径应视为高权限插件。
+
+| 能力 | 用途、默认行为与边界 |
+|---|---|
+| 会话与持久记忆 | 监听宿主会话事件，把通过治理闸门的真人输入、工具输出及溯源信息存入账本，并在后续步骤按作用域与预算注入。跨会话记忆包含用户内容，应按敏感数据管理；治理过滤不能保证识别所有秘密 |
+| 文件 / SQLite | 读写 `ledgerDir/acp-ledger.db` 及 SQLite WAL/SHM 文件；打开时自动建表/迁移。默认账本在 `resolveDshHome()/acp`，其中 home 按非空 `DSH_HOME` → 用户主目录的 `.dsh` 回退。建议显式配置独立绝对路径 |
+| 表达视图 | `viewsDir` 默认为 `ledgerDir/views`；读取/校验 `expression.json`，重建时经临时文件和 rename 替换。写失败会尝试清理临时文件 |
+| 规则视图 | `rulesDir` 默认为 `resolveDshHome()/rules`，跨 Profile 共享。重建会替换同名域文件；域集非空时可删除带 `kind: acp-rules` 标记的陈旧 `.md`，空域集跳过清理。请使用独立目录，避免与手写规则混用 |
+| MemOS 网络 | `recallProviders` 默认 `[]`，不自动探测 MemOS。显式启用 `memos` 后，向用户配置的 `baseUrl + /api/v1/memory/search` 发送 POST：查询文本（最多 512 字符）、agent 命名空间、topK。适配器不上传整份账本；查询本身仍可能包含私人内容。未指定地址时适配器使用 `http://127.0.0.1:18801`，配置远端地址会把查询送出本机 |
+| 模型服务 | 配置 `consolidationProvider/consolidationModel` 或 `llmTasks` 后，经宿主 `llm.stream` 将选中的证据文本与提炼提示交给该模型；实际 endpoint、认证、数据保留与计费由宿主提供方和外部服务决定。未配置模型时走本地规则兜底 |
+| 环境变量 / 凭据 | 当前运行源码用 `process.env` 读取 `DSH_HOME` 定位目录；未发现运行源码直接读取 API key 或系统钥匙串。模型认证委托宿主，本插件会调用宿主已授权的服务；自定义 provider 的能力需另行审查。读取环境变量会触发商城的保守凭据信号，不能据此宣称完全无凭据影响 |
+| 命令与生命周期 | 当前 `src` 运行链没有启动 Shell/子进程；manifest 无 preinstall/install/postinstall/prepare 脚本。离线运维脚本由用户显式运行，不是安装钩子，导入/放行/隔离等写操作须单独审阅 |
+
+**外部依赖**：宿主需提供 manifest 中声明的 Cordis、Schemastery、LLM、session、tools 和 UI 服务。
+MemOS 仅在显式配置时需要，不是默认启动依赖；自定义 recall provider 可以有自己的网络、
+文件和认证行为，本表仅描述内置实现。开发测试和客户端构建工具见 devDependencies/scripts。
+
+**失败边界**：
+
+- MemOS 召回默认最多 3 秒，HTTP 错误、超时或不合法结果会记录降级并返回空结果；
+  全部 provider 失败时注入回落到无 provider 分支，既有本地账本继续可用。
+- 模型路由有超时和可选 fallback；提炼批次失败不推进处理水位，保留下轮重试。
+  没有可用模型服务时采用规则兜底；外部调用可能产生费用。
+- 表达视图缺失、损坏或 checksum 不符时不注入该视图，回落账本；
+  数据目录不可写、SQLite 打开/迁移失败会导致启动失败，不能把它解释为空记忆。
+- 卸载/停用的 dispose 对在途沉淀最多等待 5 秒，然后关闭账本；
+  不删除账本、表达视图或规则视图。规则视图可能仍被其他组件读取，需检查宿主规则装载范围。
+
 ## Agent 安装指南（面向自动化装配）
 
 > 给需要在本机 dsh 装配本插件的 agent/脚本读；人工安装见下一节。
-> 三条硬约束：① 数据目录必须显式配置；② pnpm install 前先停 dsh（Windows
+> 三条装配注意事项：① 建议显式配置独立数据目录；② pnpm install 前先停 dsh（Windows
 > native DLL 锁）；③ 同 id 的 patch 条目是整体覆盖，不要重复插。
 
 **1. 定位 profile**：`<DSH_HOME>/profiles/<profile>/`（例 `C:\Users\<you>\.dsh\profiles\web`）。
@@ -95,7 +150,7 @@ dsh plugin --profile <profile> add github:Icstick/dsh-adaptive-context
 - id: adaptive-context
   name: dsh-adaptive-context
   config:
-    ledgerDir: C:\path\to\acp-data   # 必填：账本目录绝对路径；DSH_HOME 环境变量不可靠
+    ledgerDir: C:\path\to\acp-data   # 建议：独立账本目录绝对路径；省略时按 DSH_HOME → ~/.dsh 回退
     # 可选：consolidationProvider/Model——配了才有 LLM 沉淀，不配走规则兜底
 ```
 
@@ -112,7 +167,7 @@ entry → patch 里同 id 插了两遍；Web 设置无配置卡片 → 源码形
 ## 安装
 > **GitHub 一键安装**：`dsh plugin --profile <name> add github:Icstick/dsh-adaptive-context`
 > （bundle patch 会自动挂载 adaptive-context 条目）。装完后仍需在 profile 的
-> cordis.patch.yml 给该条目补 `config.ledgerDir`（数据目录必须显式）并重启；
+> cordis.patch.yml 给该条目补 `config.ledgerDir`（建议使用独立目录）并重启；
 > 完整三步与字段说明见下。
 
 
@@ -139,7 +194,7 @@ entry → patch 里同 id 插了两遍；Web 设置无配置卡片 → 源码形
 - id: adaptive-context
   name: dsh-adaptive-context
   config:
-    ledgerDir: C:\path\to\acp-data    # 必须显式写，别指望 DSH_HOME 环境变量
+    ledgerDir: C:\path\to\acp-data    # 建议显式指定独立目录；省略时按 DSH_HOME → ~/.dsh 回退
     consolidationProvider: your-provider # 可选：开了才有 LLM 提炼
     consolidationModel: your-model
 ```
@@ -172,7 +227,7 @@ pnpm install
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `ledgerDir` | string | **必填** | 数据目录（acp-ledger.db 所在）。必须显式指定，DSH_HOME 环境变量不可靠 |
+| `ledgerDir` | string | resolveDshHome()/acp | 数据目录（acp-ledger.db 所在）。建议显式指定独立绝对路径；否则按非空 DSH_HOME → ~/.dsh 回退 |
 | `hotTokens` | number | 900 | 热路径注入预算（tokens/轮）。2026-09-02 P0-5：默认对齐 MVP 总预算 900（此前文档写 300 且 composer 从不读取，实际配额合计一直是 900） |
 | `observationInjection` | boolean | false | observation 蒸馏轨注入开关（2026-09-02 决策：默认冻结；接线已就位，打开即用）。生产实例经 profile patch 开启并配权威白名单与配额 |
 | `observationAuthorities` | array | ["user_explicit","user_correction"] | T2（2026-09-07）：observation 注入权威闸门——只放行高权威蒸馏轨；single_observation 等低权威不进常规注入（留账本供 acp_query）。语义：开闸≠全量开 |
@@ -337,21 +392,25 @@ recentState / interactionPatterns / inferredTraits   ← MVP 恒空（CONTRACTS 
 
 ## 数据位置与备份
 
-- 全部数据在 `ledgerDir` 下：`acp-ledger.db`（SQLite，WAL 模式），**八张表**：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计 / **候选记忆（v7）** / **巩固跑批台账（v7）**
+- 账本数据在 `ledgerDir` 下（表达视图和规则视图可单独配置目录）：`acp-ledger.db`（SQLite，WAL 模式），**八张表**：证据 / 观察 / 候选 / 候选事件 / 规则（v6）/ 审计 / **候选记忆（v7）** / **巩固跑批台账（v7）**
 - 账本 schema 版本在 `acp_meta.schema_version`；升级是**自动**的（打开时建表并写版本号），无需手工迁移脚本
 - 物化视图在 `ledgerDir/views/` 下，可随时重建（带校验和）
 - 规则视图（反馈通道，T4）在 `rulesDir`（缺省 `~/.dsh/rules`）下：`<domain>.md` 人类可读，启动时从 ledger active 规则全量重建（Evidence is truth; views are rebuildable）；规则经外部脚本写入后视图不会自动刷新，用 `/acp rule rebuild` 手动重建
-- **陈旧清理的空域集守卫（2026-10-02 事故）**：重建时会把「目录里带 `kind: acp-rules` 头、却不在本次域集内」的 `.md` 当陈旧域删掉（用户自己的 `.md` 从不碰）；但**域集为空时整条清理跳过**，一个都不删，只在日志打一条 warn（写明目标目录与保留的 md 数）。缘由：当天一次域集为空的装配（`apply()` 里 eager 重建，未传 `rulesDir` → 回落 `~/.dsh/rules`，且那一刻账本一条 active 规则都没读到）把该目录下的 `security.md` / `workflow.md` 当真陈旧域删了。取舍：**宁可留下一个失效域的视图**（可从账本重建、可手删，下一次带非空域集的刷新会正常把它收走），也不冒删光真规则的风险
+- **陈旧清理的空域集守卫（2026-10-02 事故）**：重建时会把「目录里带 `kind: acp-rules` 头、却不在本次域集内」的 `.md` 当陈旧域删掉（清理只检查带标记的文件；同名域视图写入仍会替换目标文件，建议独立目录）；但**域集为空时整条清理跳过**，一个都不删，只在日志打一条 warn（写明目标目录与保留的 md 数）。缘由：当天一次域集为空的装配（`apply()` 里 eager 重建，未传 `rulesDir` → 回落 `~/.dsh/rules`，且那一刻账本一条 active 规则都没读到）把该目录下的 `security.md` / `workflow.md` 当真陈旧域删了。取舍：**宁可留下一个失效域的视图**（可从账本重建、可手删，下一次带非空域集的刷新会正常把它收走），也不冒删光真规则的风险
 - **备份/迁移**：导出（JSONL）→ 新环境导入，按内容哈希幂等合并
 - **数据是你的**：卸载插件不会删数据；装回来即恢复
 
 ## 卸载
 
-1. 从 profile 的 package.json dependencies 里移除 dsh-adaptive-context
-2. 从 dsh.profile.bundles 里移除包名
-3. pnpm install 后重启 dsh
+1. 停止该 Profile 的 DSH 进程，备份 Profile 配置/锁文件和账本、表达视图、规则视图。
+2. 从 profile 的 package.json dependencies 里移除 dsh-adaptive-context，并从 dsh.profile.bundles 移除包名。
+3. 移除 profile cordis.patch.yml 中手工添加的 adaptive-context 配置，避免保留失效入口。
+4. 在该 Profile 目录执行 pnpm install 后重启，确认插件不再装配。
 
-卸载不删 `ledgerDir` 的数据；想彻底清除就手动删那个目录。
+卸载保留 `ledgerDir`、`viewsDir` 和 `rulesDir` 中的数据；规则视图可能仍被宿主其他组件读取，
+需检查规则装载范围。要彻底清除时，先备份并确认这些目录是 ACP 独占目录，再自行清理。
+回滚需恢复原 Profile 配置/锁文件及必要的数据快照，步骤见
+[一次性 Profile 验收清单](docs/STORE-COMPATIBILITY.md)。
 
 ## 故障排查
 
