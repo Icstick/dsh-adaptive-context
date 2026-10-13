@@ -14,6 +14,7 @@
 
 | 文件 | 内容 |
 |---|---|
+| [STORE-COMPATIBILITY.md](STORE-COMPATIBILITY.md) | DSH 兼容来源、权限边界与一次性 Profile 验收清单（关联 Store #986） |
 | adr/README.md | ADR 索引（0001-0003，只追加） |
 | DEVELOPMENT-PLAN.md | 开发计划与问题登记（backlog，含审查发现与解法） |
 | PLAN-S2-MIGRATION.md | S2 memento 迁移/退役专项计划 |

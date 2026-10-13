@@ -27,6 +27,26 @@
       ],
       "platform": "web",
       "immediately": true
+    },
+    "compatibility": {
+      "dsh": "0.2.0-rc.1",
+      "dshReleases": {
+        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.2": "unknown",
+        "0.2.1-alpha.1": "unknown",
+        "0.2.1-alpha.2": "unknown"
+      },
+      "dshOperations": {
+        "0.2.0-rc.1": {
+          "install": "unknown",
+          "start": "unknown",
+          "uninstall": "unknown",
+          "rollback": "unknown"
+        }
+      },
+      "profiles": [
+        "web"
+      ]
     }
   },
   "files": [
