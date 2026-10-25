@@ -128,12 +128,12 @@ test('G9 预算承诺不回退：900/1200/6000/8000，quota 合计=900', () => {
   assert.equal(SOFT_MAX, 6000)
   assert.equal(HARD_MAX, 8000)
   assert.equal(MVP_SECTION_TOTAL, 900)
-  assert.deepEqual(Object.keys(MVP_SECTION_QUOTA).sort(), ['expression', 'memory', 'rules', 'user_model', 'work_state'])
+  // 2026-10-25：work_state 段摘除（工作跟踪归 WC），其 250 额度并入 memory；总量仍 900
+  assert.deepEqual(Object.keys(MVP_SECTION_QUOTA).sort(), ['expression', 'memory', 'rules', 'user_model'])
   // T4 M4.4（2026-09-07）：memory 让渡 60 给 rules（生效规则常驻段，实测校准——
   // 单条带标签固定开销 20 token，30 装不下；总额仍 900）
-  assert.equal(MVP_SECTION_QUOTA.memory, 290)
+  assert.equal(MVP_SECTION_QUOTA.memory, 540)
   assert.equal(MVP_SECTION_QUOTA.user_model, 180)
-  assert.equal(MVP_SECTION_QUOTA.work_state, 250)
   assert.equal(MVP_SECTION_QUOTA.expression, 120)
   assert.equal(MVP_SECTION_QUOTA.rules, 60)
 })

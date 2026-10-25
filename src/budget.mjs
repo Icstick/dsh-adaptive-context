@@ -26,8 +26,9 @@ export const HARD_MAX = 8000
 // （pack 实测 drop 'section rules budget'）→ rules 60（memory 350→290），总额仍 900 不回退。
 export const MVP_SECTION_QUOTA = Object.freeze({
   user_model: 180,     // Profile / 用户画像
-  work_state: 250,     // WorkState / 决策（checkpoint 接线后启用）
-  memory: 290,         // Observations / 相关记忆（原 350 - rules 让渡 60）
+  // 2026-10-25（妹妹拍板）：work_state 段从 ACP 摘除 —— 工作跟踪的唯一产出方是 WC（段 wc.work_state），
+  // ACP 只做证据与偏好支持。原 250 额度并入 memory，总量仍 900 不回退。
+  memory: 540,         // Observations / 相关记忆（原 290 + work_state 让渡 250）
   expression: 120,     // Expression few-shot
   rules: 60,           // 生效规则（T4 反馈通道；显式 section 候选，可容纳 1-2 条铁律）
 })

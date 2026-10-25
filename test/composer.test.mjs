@@ -54,7 +54,8 @@ test('lexicalScore：CJK 子串匹配', () => {
 
 test('sectionOf：claimDomain → section', () => {
   assert.equal(sectionOf(ev({ claimDomain: 'user_fact' })), 'user_model')
-  assert.equal(sectionOf(ev({ claimDomain: 'work' })), 'work_state')
+  // 2026-10-25：work 域不再单独成段（work_state 归 WC 产出），并入 memory
+  assert.equal(sectionOf(ev({ claimDomain: 'work' })), 'memory')
   assert.equal(sectionOf(ev({ claimDomain: 'style' })), 'expression')
   assert.equal(sectionOf(ev({ claimDomain: 'external_fact' })), 'memory')
 })
@@ -64,8 +65,9 @@ test('packBySection：超 quota 截断', () => {
     id: 'x' + i, section: 'memory', utility: 1, tokens: 100, content: 'x'.repeat(140),
   }))
   const r = packBySection(cands)
-  assert.ok(r.items.length <= 3) // memory quota 300 / 100 = 3
-  assert.equal(r.totalTokens <= 300, true)
+  // 2026-10-25：memory quota 290→540（work_state 250 并入）→ 100 token/条时最多 5 条
+  assert.ok(r.items.length <= 5)
+  assert.equal(r.totalTokens <= 540, true)
 })
 
 test('renderSourceLabelled：带来源标签', () => {

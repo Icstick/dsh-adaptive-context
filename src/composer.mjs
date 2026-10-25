@@ -485,7 +485,9 @@ export function jaccard(a, b) {
 export function sectionOf(cand) {
   const domain = cand.claimDomain ?? ''
   if (domain === 'user_preference' || domain === 'user_fact') return 'user_model'
-  if (domain === 'work') return 'work_state'
+  // 2026-10-25：work 域不再单独成段（work_state 段由 WC 产出，段 wc.work_state），
+  // ACP 只做证据与偏好支持 —— 这类证据并入 memory，仍可注入，但不会与 WC 重复。
+  if (domain === 'work') return 'memory'
   if (domain === 'style') return 'expression'
   if (domain === 'experience' || domain === 'external_fact') return 'memory'
   return 'memory'
