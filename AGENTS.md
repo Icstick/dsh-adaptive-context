@@ -56,7 +56,12 @@ dsh-adaptive-context（ACP）：DeepSeek Harness 的上下文控制面插件。�
 
 ## 提交纪律
 
-小步提交；每个改动一个主题；**feature 分支开发，合 main 后删分支（本仓只保留 main）**；合 main 前跑全量测试。
+小步提交；每个改动一个主题；**feature 分支开发，合 main 后删分支（本仓只保留 main）**。
+
+**合 main 的判据（2026-10-25 修订）**：以**桌面版 DSH 能正常工作**为准 —— 桌面版是当前主用形态，插件经 vendor junction 直接读工作树，
+所以「重启后功能正常 + 改动涉及模块的测试通过」即可合 main。
+**全量 500+ 套件**只在 pnpm 源码 checkout（有 `pnpm install` 的环境）里跑；本机 checkout 缺 peer（如 `@deepseek-ai/dsh-tools`）时跑不动，
+不作为阻塞条件。
 
 > 2026-09-22 起本仓 `main` 直接对应远端 `Icstick/dsh-adaptive-context`，合完即推。跨机同步说明见 `docs/history/HANDOFF-2026-09-22.md`。
 
